@@ -68,7 +68,7 @@ export default function LibraryScreen() {
 
             <Text style={[styles.sectionLabel, { color: palette.textMuted }]}>PRIVACY & ABOUT</Text>
             <Card>
-              <View style={styles.aboutRow}><View style={[styles.logo, { backgroundColor: palette.primary }]}><Ionicons name="pulse" size={28} color={palette.onPrimary} /></View><View style={styles.aboutCopy}><Text style={[styles.settingTitle, { color: palette.text }]}>Tunera 0.1.0</Text><Text style={[styles.help, { color: palette.textMuted }]}>Offline by design. No accounts, ads, analytics, recordings, or network-dependent features.</Text></View></View>
+              <View style={styles.aboutRow}><View style={[styles.logo, { backgroundColor: palette.primary }]}><Ionicons name="pulse" size={28} color={palette.onPrimary} /></View><View style={styles.aboutCopy}><Text style={[styles.settingTitle, { color: palette.text }]}>Tunera 0.1.1</Text><Text style={[styles.help, { color: palette.textMuted }]}>Offline by design. No accounts, ads, analytics, recordings, or network-dependent features.</Text></View></View>
               <Pressable accessibilityRole="button" accessibilityLabel="Reset all settings" onPress={() => Alert.alert('Reset all settings?', 'Your tuner and metronome preferences will return to defaults.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Reset', style: 'destructive', onPress: reset }])} style={[styles.reset, { borderColor: palette.danger }]}><Text style={[styles.resetText, { color: palette.danger }]}>Reset all settings</Text></Pressable>
             </Card>
           </View>
