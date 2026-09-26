@@ -3,6 +3,10 @@ import type { ExpoConfig } from 'expo/config';
 const config: ExpoConfig = {
   name: 'Tunera',
   slug: 'tunera',
+  owner: 'cabbageman2',
+  extra: {
+    eas: { projectId: 'bdc76f5c-c510-4dba-86eb-b27d7795fa5d' },
+  },
   version: '0.1.0',
   orientation: 'default',
   icon: './assets/icon.png',
