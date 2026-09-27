@@ -10,6 +10,7 @@ import { Card, IconButton, NumberField, PillButton, Screen, SettingRow, Sheet } 
 import { MetronomeMini } from '@/components/MetronomeMini';
 import { TuningGauge } from '@/components/TuningGauge';
 import { allInstruments, findInstrument, findTuning, TRANSPOSITIONS } from '@/constants/instruments';
+import { getInputProblem } from '@/lib/audioInputState';
 import { adjustedTargetMidi, analyzeFrequency, midiToNote, minimumConfidence, writtenNote } from '@/lib/pitch';
 import { useApp } from '@/store/AppProvider';
 import { radius, spacing } from '@/theme';
@@ -25,12 +26,13 @@ export default function TunerScreen() {
   const activeTuning = findTuning(instrument, tuner.tuningId);
   const target = activeTuning?.targets[tuner.targetIndex];
   const targetMidi = target ? adjustedTargetMidi(target.midi, tuner.capo, tuner.detune) : undefined;
+  const { running, tonePlaying, toneError, toggleTone } = useRuntimeAudio();
   const { permission, snapshot, error, isListening, start, stop } = usePitchInput(
     instrument.detectorProfile,
     tuner.sensitivity,
     tuner.noiseGate,
+    running || tonePlaying,
   );
-  const { tonePlaying, toggleTone } = useRuntimeAudio();
   const [instrumentSheet, setInstrumentSheet] = useState(false);
   const [pitchSheet, setPitchSheet] = useState(false);
   const [search, setSearch] = useState('');
@@ -138,7 +140,7 @@ export default function TunerScreen() {
     setInstrumentSheet(false);
   };
 
-  const statusText = error ? 'Input problem' : isListening ? 'Listening' : permission === 'denied' ? 'Microphone off' : 'Ready';
+  const inputProblem = getInputProblem(permission, error);
   const toneMidi = targetMidi ?? detected?.roundedMidi ?? tuner.referenceToneMidi;
   const pitchSummary = [
     `A4 ${tuner.a4}`,
@@ -151,9 +153,14 @@ export default function TunerScreen() {
     <Screen>
       <ScrollView contentContainerStyle={[styles.page, tablet && styles.pageTablet]}>
         <View style={styles.header}>
-          <View>
+          <View style={styles.brandRow}>
             <Text style={[styles.brand, { color: palette.text }]}>Tunera</Text>
-            <View style={styles.statusRow}><View style={[styles.statusDot, { backgroundColor: isListening ? palette.success : palette.textMuted }]} /><Text style={[styles.status, { color: palette.textMuted }]}>{statusText}</Text></View>
+            {inputProblem ? (
+              <View style={styles.statusRow}>
+                <View style={[styles.statusDot, { backgroundColor: palette.danger }]} />
+                <Text numberOfLines={1} style={[styles.status, { color: palette.danger }]}>Input problem</Text>
+              </View>
+            ) : null}
           </View>
           <IconButton icon="settings-outline" label="Open settings" onPress={() => router.push('/library')} />
         </View>
@@ -165,13 +172,13 @@ export default function TunerScreen() {
               <PillButton icon="options-outline" label={pitchSummary} onPress={() => setPitchSheet(true)} />
             </View>
 
-            {permission !== 'granted' || error ? (
+            {inputProblem ? (
               <Card style={styles.permissionCard}>
-                <Ionicons name={permission === 'denied' ? 'mic-off-outline' : 'mic-outline'} size={30} color={palette.primary} />
+                <Ionicons name={inputProblem.kind === 'denied' ? 'mic-off-outline' : 'mic-outline'} size={30} color={palette.primary} />
                 <View style={styles.permissionCopy}>
-                  <Text style={[styles.permissionTitle, { color: palette.text }]}>{error ?? 'Microphone access needed'}</Text>
+                  <Text style={[styles.permissionTitle, { color: palette.text }]}>{inputProblem.title}</Text>
                 </View>
-                <PillButton label={permission === 'denied' ? 'Open settings' : 'Allow mic'} onPress={() => permission === 'denied' ? void Linking.openSettings() : void start()} selected />
+                <PillButton label={inputProblem.actionLabel} onPress={() => inputProblem.kind === 'denied' ? void Linking.openSettings() : void start()} selected />
               </Card>
             ) : null}
 
@@ -209,6 +216,7 @@ export default function TunerScreen() {
               </Pressable>
               <IconButton icon={isListening ? 'mic' : 'mic-off-outline'} label={isListening ? 'Stop listening' : 'Start listening'} selected={isListening} onPress={() => void (isListening ? stop() : start())} />
             </View>
+            {toneError ? <Text accessibilityLiveRegion="polite" style={[styles.playbackError, { color: palette.danger }]}>{toneError}</Text> : null}
           </View>
           <View style={tablet ? styles.sideColumn : styles.miniPhone}><MetronomeMini expanded={tablet} /></View>
         </View>
@@ -251,8 +259,9 @@ const styles = StyleSheet.create({
   page: { padding: spacing.md, paddingBottom: 28, gap: spacing.md, maxWidth: 1180, width: '100%', alignSelf: 'center' },
   pageTablet: { padding: spacing.xl },
   header: { minHeight: 58, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  brandRow: { flexDirection: 'row', alignItems: 'center', gap: 10, flexShrink: 1 },
   brand: { fontSize: 27, fontWeight: '900', letterSpacing: -0.8 },
-  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 },
+  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 1 },
   statusDot: { width: 7, height: 7, borderRadius: 4 },
   status: { fontSize: 12, fontWeight: '700' },
   workspace: { gap: spacing.md }, workspaceTablet: { flexDirection: 'row', alignItems: 'flex-start' }, mainColumn: { flex: 1, gap: spacing.md }, sideColumn: { width: 300 }, miniPhone: {},
@@ -265,6 +274,7 @@ const styles = StyleSheet.create({
   details: { width: '100%', borderTopWidth: 1, flexDirection: 'row', marginTop: 22, paddingTop: 14 }, detail: { flex: 1, alignItems: 'center' }, detailLabel: { fontSize: 9, fontWeight: '800', letterSpacing: 0.8 }, detailValue: { fontSize: 14, fontWeight: '800', marginTop: 4, fontVariant: ['tabular-nums'] },
   warning: { textAlign: 'center', fontSize: 12, fontWeight: '700', marginTop: 12 }, strings: { gap: 8 },
   actions: { flexDirection: 'row', gap: 10 }, toneButton: { minHeight: 52, flex: 1, borderRadius: radius.md, borderWidth: 1, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 9 }, toneText: { fontSize: 15, fontWeight: '800' },
+  playbackError: { textAlign: 'center', fontSize: 12, fontWeight: '700' },
   search: { minHeight: 52, borderRadius: radius.md, borderWidth: 1, paddingHorizontal: 16, fontSize: 16 },
   instrumentItem: { borderBottomWidth: StyleSheet.hairlineWidth, paddingVertical: 8 }, instrumentPress: { minHeight: 60, flexDirection: 'row', alignItems: 'center' }, instrumentCopy: { flex: 1 }, instrumentName: { fontSize: 17, fontWeight: '800' }, tuningChoices: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, paddingBottom: 10 },
   fieldRow: { flexDirection: 'row', gap: 12 }, sectionLabel: { fontSize: 11, fontWeight: '900', letterSpacing: 1, marginTop: 8 }, choiceWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },

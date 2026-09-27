@@ -3,17 +3,35 @@ import {
   useAudioRecorder,
   type AudioDataEvent,
   type RecordingConfig,
+  type RecordingInterruptionEvent,
 } from '@siteed/audio-studio';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { AppState } from 'react-native';
 
+import {
+  classifyRecordingInterruption,
+  recordingInterruptionMessage,
+} from '@/lib/audioInputState';
 import { detectPitchYin } from '@/lib/yin';
 import { yinThreshold } from '@/lib/pitch';
 import type { DetectorProfile, PermissionState, PitchSnapshot } from '@/types';
 
 const SAMPLE_RATE = 48_000;
+const INTERRUPTION_GRACE_MS = 2_000;
 
-export function usePitchInput(profile: DetectorProfile, sensitivity: number, noiseGate: number) {
-  const { startRecording, stopRecording, isRecording } = useAudioRecorder();
+export function usePitchInput(
+  profile: DetectorProfile,
+  sensitivity: number,
+  noiseGate: number,
+  appPlaybackActive = false,
+) {
+  const {
+    startRecording,
+    stopRecording,
+    resumeRecording,
+    isRecording,
+    isPaused,
+  } = useAudioRecorder();
   const [permission, setPermission] = useState<PermissionState>('checking');
   const [snapshot, setSnapshot] = useState<PitchSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -21,6 +39,45 @@ export function usePitchInput(profile: DetectorProfile, sensitivity: number, noi
   const writeRef = useRef(0);
   const filledRef = useRef(0);
   const lastAnalysisRef = useRef(0);
+  const desiredListeningRef = useRef(false);
+  const appPlaybackActiveRef = useRef(appPlaybackActive);
+  const lastAudioAtRef = useRef(0);
+  const interruptionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const errorSourceRef = useRef<'start' | 'interruption' | null>(null);
+
+  useEffect(() => {
+    appPlaybackActiveRef.current = appPlaybackActive;
+  }, [appPlaybackActive]);
+
+  const clearInterruptionTimer = useCallback(() => {
+    if (interruptionTimerRef.current) clearTimeout(interruptionTimerRef.current);
+    interruptionTimerRef.current = null;
+  }, []);
+
+  const clearInterruptionProblem = useCallback(() => {
+    clearInterruptionTimer();
+    if (errorSourceRef.current === 'interruption') {
+      errorSourceRef.current = null;
+      setError(null);
+    }
+  }, [clearInterruptionTimer]);
+
+  const setInputProblem = useCallback((message: string, source: 'start' | 'interruption') => {
+    errorSourceRef.current = source;
+    setError(message);
+  }, []);
+
+  const verifyInterruptionRecovery = useCallback((
+    event: RecordingInterruptionEvent,
+    interruptedAt: number,
+  ) => {
+    clearInterruptionTimer();
+    interruptionTimerRef.current = setTimeout(() => {
+      interruptionTimerRef.current = null;
+      if (!desiredListeningRef.current || lastAudioAtRef.current > interruptedAt) return;
+      setInputProblem(recordingInterruptionMessage(event.reason), 'interruption');
+    }, INTERRUPTION_GRACE_MS);
+  }, [clearInterruptionTimer, setInputProblem]);
 
   useEffect(() => {
     ringRef.current = new Float32Array(profile === 'low' ? 8192 : 4096);
@@ -28,7 +85,7 @@ export function usePitchInput(profile: DetectorProfile, sensitivity: number, noi
     filledRef.current = 0;
   }, [profile]);
 
-  useEffect(() => {
+  const refreshPermission = useCallback(() => {
     void AudioStudioModule.getPermissionsAsync()
       .then((result: { granted?: boolean; status?: string }) => {
         setPermission(result.granted ? 'granted' : result.status === 'denied' ? 'denied' : 'undetermined');
@@ -36,7 +93,17 @@ export function usePitchInput(profile: DetectorProfile, sensitivity: number, noi
       .catch(() => setPermission('undetermined'));
   }, []);
 
+  useEffect(() => {
+    refreshPermission();
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') refreshPermission();
+    });
+    return () => subscription.remove();
+  }, [refreshPermission]);
+
   const onAudioStream = useCallback(async (event: AudioDataEvent) => {
+    lastAudioAtRef.current = Date.now();
+    clearInterruptionProblem();
     const incoming = event.data instanceof Float32Array ? event.data : new Float32Array(event.data as ArrayLike<number>);
     const ring = ringRef.current;
     for (let index = 0; index < incoming.length; index += 1) {
@@ -57,17 +124,63 @@ export function usePitchInput(profile: DetectorProfile, sensitivity: number, noi
       minimumRms: noiseGate,
     });
     setSnapshot(result);
-  }, [noiseGate, profile, sensitivity]);
+  }, [clearInterruptionProblem, noiseGate, profile, sensitivity]);
+
+  const onRecordingInterrupted = useCallback((event: RecordingInterruptionEvent) => {
+    if (!desiredListeningRef.current) return;
+    const interruptedAt = Date.now();
+    const disposition = classifyRecordingInterruption(
+      event.reason,
+      appPlaybackActiveRef.current,
+    );
+
+    if (disposition === 'fail') {
+      clearInterruptionTimer();
+      setInputProblem(recordingInterruptionMessage(event.reason), 'interruption');
+      return;
+    }
+
+    if (disposition === 'defer') {
+      verifyInterruptionRecovery(event, interruptedAt);
+      return;
+    }
+
+    clearInterruptionProblem();
+    if (!event.isPaused) return;
+
+    // App-owned mixed playback should not pause capture. If a device still reports a
+    // focus loss, resume defensively and only surface it if samples do not return.
+    void resumeRecording()
+      .then(() => clearInterruptionProblem())
+      .catch(() => verifyInterruptionRecovery(event, interruptedAt));
+  }, [clearInterruptionProblem, clearInterruptionTimer, resumeRecording, setInputProblem, verifyInterruptionRecovery]);
 
   const start = useCallback(async () => {
+    desiredListeningRef.current = true;
+    clearInterruptionTimer();
+    const recoveringFromProblem = errorSourceRef.current !== null;
+    errorSourceRef.current = null;
     setError(null);
+    let permissionGranted = false;
     try {
       const result = await AudioStudioModule.requestPermissionsAsync() as { granted?: boolean };
       if (!result.granted) {
+        desiredListeningRef.current = false;
         setPermission('denied');
         return;
       }
+      permissionGranted = true;
       setPermission('granted');
+
+      if (isPaused) {
+        await resumeRecording();
+        return;
+      }
+      if (isRecording) {
+        if (!recoveringFromProblem) return;
+        await stopRecording();
+      }
+
       const config: RecordingConfig = {
         sampleRate: SAMPLE_RATE,
         channels: 1,
@@ -76,28 +189,48 @@ export function usePitchInput(profile: DetectorProfile, sensitivity: number, noi
         interval: 100,
         bufferDurationSeconds: 0.1,
         keepFullAnalysis: false,
+        keepAwake: false,
         output: { primary: { enabled: false } },
         autoResumeAfterInterruption: true,
-        onRecordingInterrupted: () => setError('Listening was interrupted. Tap retry when your audio route is ready.'),
+        android: { audioFocusStrategy: 'communication' },
+        ios: {
+          audioSession: {
+            category: 'PlayAndRecord',
+            mode: 'Measurement',
+            categoryOptions: ['MixWithOthers', 'AllowBluetooth', 'DefaultToSpeaker'],
+          },
+        },
+        onRecordingInterrupted,
         onAudioStream,
       };
       await startRecording(config);
     } catch (caught) {
-      setPermission('error');
-      setError(caught instanceof Error ? caught.message : 'Microphone input could not be started.');
+      if (!permissionGranted) setPermission('error');
+      setInputProblem(
+        caught instanceof Error ? caught.message : 'Microphone input could not be started.',
+        'start',
+      );
     }
-  }, [onAudioStream, startRecording]);
+  }, [clearInterruptionTimer, isPaused, isRecording, onAudioStream, onRecordingInterrupted, resumeRecording, setInputProblem, startRecording, stopRecording]);
 
   const stop = useCallback(async () => {
-    if (!isRecording) return;
+    desiredListeningRef.current = false;
+    clearInterruptionTimer();
+    errorSourceRef.current = null;
+    setError(null);
+    if (!isRecording && !isPaused) return;
     try {
       await stopRecording();
     } catch {
       // The native recorder may already be stopped after a route interruption.
     }
-  }, [isRecording, stopRecording]);
+  }, [clearInterruptionTimer, isPaused, isRecording, stopRecording]);
 
-  useEffect(() => () => { void stopRecording().catch(() => undefined); }, [stopRecording]);
+  useEffect(() => () => {
+    desiredListeningRef.current = false;
+    clearInterruptionTimer();
+    void stopRecording().catch(() => undefined);
+  }, [clearInterruptionTimer, stopRecording]);
 
   return { permission, snapshot, error, isListening: isRecording, start, stop };
 }

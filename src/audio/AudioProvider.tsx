@@ -1,7 +1,7 @@
-import { useAudioPlayer, type AudioPlayer, type AudioStatus } from 'expo-audio';
+import { setAudioModeAsync, useAudioPlayer, type AudioPlayer, type AudioStatus } from 'expo-audio';
 import { File, Paths } from 'expo-file-system';
 import * as Haptics from 'expo-haptics';
-import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
+import { activateKeepAwakeAsync } from 'expo-keep-awake';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Platform } from 'react-native';
 
@@ -16,6 +16,8 @@ import {
 import { midiToFrequency } from '@/lib/pitch';
 import { useApp } from '@/store/AppProvider';
 import type { MetronomeSettings } from '@/types';
+import { deactivateKeepAwakeIfActive } from './keepAwake';
+import { startLoopingPlayback } from './playerPlayback';
 
 interface AudioContextValue {
   running: boolean;
@@ -27,6 +29,7 @@ interface AudioContextValue {
   toggleMetronome: () => void;
   stopMetronome: () => void;
   tonePlaying: boolean;
+  toneError: string | null;
   toggleTone: (midi?: number) => void;
   stopTone: () => void;
 }
@@ -39,6 +42,21 @@ interface PreparedLoopSource {
 const AudioContext = createContext<AudioContextValue | null>(null);
 const KEEP_AWAKE_TAG = 'tunera-metronome';
 const PLAYER_LOAD_TIMEOUT_MS = 10_000;
+
+function safePause(player: AudioPlayer): void {
+  try {
+    player.pause();
+  } catch (error) {
+    console.warn('Could not pause an audio player cleanly.', error);
+  }
+}
+
+function referenceToneError(error: unknown): string {
+  const detail = error instanceof Error ? error.message.trim() : '';
+  return detail
+    ? `Reference tone could not be played: ${detail}`
+    : 'Reference tone could not be played. Try again.';
+}
 
 function metronomeAudioSettings(settings: MetronomeSettings): MetronomeLoopSettings {
   return {
@@ -109,6 +127,7 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
   const [practiceElapsedSeconds, setPracticeElapsedSeconds] = useState(0);
   const [practiceSecondsRemaining, setPracticeSecondsRemaining] = useState<number | null>(null);
   const [tonePlaying, setTonePlaying] = useState(false);
+  const [toneError, setToneError] = useState<string | null>(null);
 
   const visualTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const visualTickRef = useRef<() => void>(() => undefined);
@@ -134,16 +153,43 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
   const countInRemainingRef = useRef(0);
   const practiceStartedAtRef = useRef<number | null>(null);
   const sessionClockStartedRef = useRef(false);
+  const audioSessionPromiseRef = useRef<Promise<void> | null>(null);
+  const toneRequestRef = useRef(0);
+  const toneDesiredRef = useRef(false);
+  const activeTonePlayerRef = useRef<AudioPlayer | null>(null);
   settingsRef.current = state.metronome;
 
   const metronomePlayerA = useAudioPlayer(null, { updateInterval: 100 });
   const metronomePlayerB = useAudioPlayer(null, { updateInterval: 100 });
   const accentPlayer = useAudioPlayer(require('../../assets/audio/click-accent.wav'));
   const clickPlayer = useAudioPlayer(require('../../assets/audio/click.wav'));
-  const lowTonePlayer = useAudioPlayer(require('../../assets/audio/tone-a2.wav'));
-  const highTonePlayer = useAudioPlayer(require('../../assets/audio/tone-a4.wav'));
+  const lowTonePlayer = useAudioPlayer(require('../../assets/audio/tone-a2.wav'), { updateInterval: 100 });
+  const highTonePlayer = useAudioPlayer(require('../../assets/audio/tone-a4.wav'), { updateInterval: 100 });
   const metronomePlayersRef = useRef<[AudioPlayer, AudioPlayer]>([metronomePlayerA, metronomePlayerB]);
   metronomePlayersRef.current = [metronomePlayerA, metronomePlayerB];
+
+  const ensureAudioSession = useCallback((): Promise<void> => {
+    if (audioSessionPromiseRef.current) return audioSessionPromiseRef.current;
+    const request = setAudioModeAsync({
+      allowsRecording: true,
+      interruptionMode: 'mixWithOthers',
+      playsInSilentMode: true,
+      shouldPlayInBackground: false,
+      shouldRouteThroughEarpiece: false,
+      allowsBackgroundRecording: false,
+    }).catch((error) => {
+      if (audioSessionPromiseRef.current === request) audioSessionPromiseRef.current = null;
+      throw error;
+    });
+    audioSessionPromiseRef.current = request;
+    return request;
+  }, []);
+
+  useEffect(() => {
+    void ensureAudioSession().catch((error) => {
+      console.warn('Could not configure the shared recording/playback audio session.', error);
+    });
+  }, [ensureAudioSession]);
 
   const playClick = useCallback((accented: boolean, volume = 1) => {
     const player = accented ? accentPlayer : clickPlayer;
@@ -302,6 +348,8 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
 
       let source: PreparedLoopSource | null = null;
       try {
+        await ensureAudioSession();
+        if (!desiredRunningRef.current || request !== requestRef.current) return;
         source = prepareLoopSource(audioSettings);
         if (!desiredRunningRef.current || request !== requestRef.current) {
           source.release();
@@ -376,7 +424,7 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
     setPracticeSecondsRemaining(
       settingsRef.current.practiceMinutes > 0 ? settingsRef.current.practiceMinutes * 60 : null,
     );
-    void deactivateKeepAwake(KEEP_AWAKE_TAG);
+    void deactivateKeepAwakeIfActive(KEEP_AWAKE_TAG);
   }, []);
   stopMetronomeRef.current = stopMetronome;
 
@@ -421,7 +469,7 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
 
   useEffect(() => {
     if (running && state.metronome.keepAwake) void activateKeepAwakeAsync(KEEP_AWAKE_TAG);
-    else void deactivateKeepAwake(KEEP_AWAKE_TAG);
+    else void deactivateKeepAwakeIfActive(KEEP_AWAKE_TAG);
   }, [running, state.metronome.keepAwake]);
 
   useEffect(() => {
@@ -445,29 +493,84 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
     if (visualTimerRef.current) clearTimeout(visualTimerRef.current);
     for (const player of metronomePlayersRef.current) player.pause();
     for (const release of playerSourceCleanupRef.current) release();
-    void deactivateKeepAwake(KEEP_AWAKE_TAG);
+    void deactivateKeepAwakeIfActive(KEEP_AWAKE_TAG);
   }, []);
 
   const stopTone = useCallback(() => {
-    lowTonePlayer.pause();
-    highTonePlayer.pause();
+    toneDesiredRef.current = false;
+    toneRequestRef.current += 1;
+    activeTonePlayerRef.current = null;
+    safePause(lowTonePlayer);
+    safePause(highTonePlayer);
     setTonePlaying(false);
   }, [highTonePlayer, lowTonePlayer]);
 
   const toggleTone = useCallback((midi = state.tuner.referenceToneMidi) => {
-    if (tonePlaying) {
+    if (toneDesiredRef.current) {
       stopTone();
       return;
     }
+
+    toneDesiredRef.current = true;
+    const request = ++toneRequestRef.current;
+    setToneError(null);
     const frequency = midiToFrequency(midi, state.tuner.a4);
     const useLow = frequency < 260;
     const player = useLow ? lowTonePlayer : highTonePlayer;
-    player.shouldCorrectPitch = false;
-    player.playbackRate = Math.max(0.1, Math.min(2, frequency / (useLow ? 110 : 440)));
-    player.volume = state.tuner.referenceToneVolume;
-    player.loop = true;
-    void player.seekTo(0).then(() => player.play()).then(() => setTonePlaying(true)).catch(() => setTonePlaying(false));
-  }, [highTonePlayer, lowTonePlayer, state.tuner.a4, state.tuner.referenceToneMidi, state.tuner.referenceToneVolume, stopTone, tonePlaying]);
+    const otherPlayer = useLow ? highTonePlayer : lowTonePlayer;
+    activeTonePlayerRef.current = player;
+
+    void (async () => {
+      try {
+        await ensureAudioSession();
+        if (!toneDesiredRef.current || request !== toneRequestRef.current) return;
+        safePause(otherPlayer);
+        await startLoopingPlayback(
+          player,
+          {
+            playbackRate: Math.max(0.1, Math.min(2, frequency / (useLow ? 110 : 440))),
+            volume: state.tuner.referenceToneVolume,
+          },
+          () => toneDesiredRef.current && request === toneRequestRef.current,
+          'the reference tone',
+        );
+        if (!toneDesiredRef.current || request !== toneRequestRef.current) {
+          safePause(player);
+          return;
+        }
+        setTonePlaying(true);
+      } catch (error) {
+        if (request !== toneRequestRef.current) return;
+        toneDesiredRef.current = false;
+        activeTonePlayerRef.current = null;
+        safePause(player);
+        setTonePlaying(false);
+        setToneError(referenceToneError(error));
+        console.warn('Reference tone playback failed.', error);
+      }
+    })();
+  }, [ensureAudioSession, highTonePlayer, lowTonePlayer, state.tuner.a4, state.tuner.referenceToneMidi, state.tuner.referenceToneVolume, stopTone]);
+
+  useEffect(() => {
+    const players = [lowTonePlayer, highTonePlayer];
+    const subscriptions = players.map((player) => (
+      player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
+        if (
+          !status.error
+          || !toneDesiredRef.current
+          || activeTonePlayerRef.current !== player
+        ) return;
+        toneDesiredRef.current = false;
+        toneRequestRef.current += 1;
+        activeTonePlayerRef.current = null;
+        safePause(player);
+        setTonePlaying(false);
+        setToneError(referenceToneError(new Error(status.error)));
+        console.warn('Reference tone player reported an error.', status.error);
+      })
+    ));
+    return () => subscriptions.forEach((subscription) => subscription.remove());
+  }, [highTonePlayer, lowTonePlayer]);
 
   const value = useMemo(() => ({
     running,
@@ -479,6 +582,7 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
     toggleMetronome,
     stopMetronome,
     tonePlaying,
+    toneError,
     toggleTone,
     stopTone,
   }), [
@@ -491,6 +595,7 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
     toggleMetronome,
     stopMetronome,
     tonePlaying,
+    toneError,
     toggleTone,
     stopTone,
   ]);
