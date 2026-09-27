@@ -26,7 +26,7 @@ export default function TunerScreen() {
   const activeTuning = findTuning(instrument, tuner.tuningId);
   const target = activeTuning?.targets[tuner.targetIndex];
   const targetMidi = target ? adjustedTargetMidi(target.midi, tuner.capo, tuner.detune) : undefined;
-  const { running, tonePlaying, toneError, toggleTone } = useRuntimeAudio();
+  const { running, tonePlaying, toneError, toggleTone, retuneTone } = useRuntimeAudio();
   const { permission, snapshot, error, isListening, start, stop } = usePitchInput(
     instrument.detectorProfile,
     tuner.sensitivity,
@@ -142,6 +142,12 @@ export default function TunerScreen() {
 
   const inputProblem = getInputProblem(permission, error);
   const toneMidi = targetMidi ?? detected?.roundedMidi ?? tuner.referenceToneMidi;
+  const selectedToneMidi = targetMidi ?? tuner.referenceToneMidi;
+
+  useEffect(() => {
+    retuneTone(selectedToneMidi);
+  }, [retuneTone, selectedToneMidi]);
+
   const pitchSummary = [
     `A4 ${tuner.a4}`,
     tuner.transpositionLabel,

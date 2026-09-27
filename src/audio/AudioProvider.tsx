@@ -31,6 +31,7 @@ interface AudioContextValue {
   tonePlaying: boolean;
   toneError: string | null;
   toggleTone: (midi?: number) => void;
+  retuneTone: (midi: number) => void;
   stopTone: () => void;
 }
 
@@ -505,14 +506,7 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
     setTonePlaying(false);
   }, [highTonePlayer, lowTonePlayer]);
 
-  const toggleTone = useCallback((midi = state.tuner.referenceToneMidi) => {
-    if (toneDesiredRef.current) {
-      stopTone();
-      return;
-    }
-
-    toneDesiredRef.current = true;
-    const request = ++toneRequestRef.current;
+  const requestTonePlayback = useCallback((midi: number, request: number) => {
     setToneError(null);
     const frequency = midiToFrequency(midi, state.tuner.a4);
     const useLow = frequency < 260;
@@ -534,22 +528,35 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
           () => toneDesiredRef.current && request === toneRequestRef.current,
           'the reference tone',
         );
-        if (!toneDesiredRef.current || request !== toneRequestRef.current) {
-          safePause(player);
-          return;
-        }
+        if (!toneDesiredRef.current || request !== toneRequestRef.current) return;
         setTonePlaying(true);
       } catch (error) {
         if (request !== toneRequestRef.current) return;
         toneDesiredRef.current = false;
         activeTonePlayerRef.current = null;
-        safePause(player);
+        safePause(lowTonePlayer);
+        safePause(highTonePlayer);
         setTonePlaying(false);
         setToneError(referenceToneError(error));
         console.warn('Reference tone playback failed.', error);
       }
     })();
-  }, [ensureAudioSession, highTonePlayer, lowTonePlayer, state.tuner.a4, state.tuner.referenceToneMidi, state.tuner.referenceToneVolume, stopTone]);
+  }, [ensureAudioSession, highTonePlayer, lowTonePlayer, state.tuner.a4, state.tuner.referenceToneVolume]);
+
+  const toggleTone = useCallback((midi = state.tuner.referenceToneMidi) => {
+    if (toneDesiredRef.current) {
+      stopTone();
+      return;
+    }
+
+    toneDesiredRef.current = true;
+    requestTonePlayback(midi, ++toneRequestRef.current);
+  }, [requestTonePlayback, state.tuner.referenceToneMidi, stopTone]);
+
+  const retuneTone = useCallback((midi: number) => {
+    if (!toneDesiredRef.current) return;
+    requestTonePlayback(midi, ++toneRequestRef.current);
+  }, [requestTonePlayback]);
 
   useEffect(() => {
     const players = [lowTonePlayer, highTonePlayer];
@@ -563,7 +570,8 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
         toneDesiredRef.current = false;
         toneRequestRef.current += 1;
         activeTonePlayerRef.current = null;
-        safePause(player);
+        safePause(lowTonePlayer);
+        safePause(highTonePlayer);
         setTonePlaying(false);
         setToneError(referenceToneError(new Error(status.error)));
         console.warn('Reference tone player reported an error.', status.error);
@@ -584,6 +592,7 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
     tonePlaying,
     toneError,
     toggleTone,
+    retuneTone,
     stopTone,
   }), [
     running,
@@ -597,6 +606,7 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
     tonePlaying,
     toneError,
     toggleTone,
+    retuneTone,
     stopTone,
   ]);
 
