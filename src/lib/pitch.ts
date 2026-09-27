@@ -49,6 +49,20 @@ export function writtenNote(concertMidi: number, transpositionSemitones: number)
   return midiToNote(concertMidi + transpositionSemitones);
 }
 
+export function adjustedTargetMidi(midi: number, capo: number, detune: number): number {
+  return Math.max(0, Math.min(127, midi + Math.round(capo) + Math.round(detune)));
+}
+
+export function minimumConfidence(sensitivity: number): number {
+  const normalized = Math.max(0, Math.min(100, sensitivity)) / 100;
+  return 0.85 - normalized * 0.5;
+}
+
+export function yinThreshold(sensitivity: number): number {
+  const normalized = Math.max(0, Math.min(100, sensitivity)) / 100;
+  return 0.08 + normalized * 0.17;
+}
+
 export function clampCents(cents: number, limit = 50): number {
   return Math.max(-limit, Math.min(limit, cents));
 }

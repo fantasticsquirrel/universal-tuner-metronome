@@ -33,6 +33,11 @@ export interface TunerSettings {
   transposition: number;
   transpositionLabel: string;
   tolerance: number;
+  capo: number;
+  detune: number;
+  sensitivity: number;
+  noiseGate: number;
+  lockHoldMs: number;
   autoAdvance: boolean;
   showDetails: boolean;
   referenceToneMidi: number;
@@ -54,6 +59,8 @@ export interface MetronomeSettings {
   accents: AccentLevel[];
   haptics: boolean;
   keepAwake: boolean;
+  countInBars: number;
+  practiceMinutes: number;
   trainer: SpeedTrainerSettings;
 }
 
@@ -63,11 +70,21 @@ export interface AppPreferences {
   reduceMotion: boolean;
 }
 
+export interface PracticePreset {
+  id: string;
+  name: string;
+  tuner: TunerSettings;
+  metronome: MetronomeSettings;
+}
+
 export interface PersistedState {
+  schemaVersion: 2;
   tuner: TunerSettings;
   metronome: MetronomeSettings;
   preferences: AppPreferences;
   favoriteInstrumentIds: string[];
+  customInstruments: InstrumentPreset[];
+  practicePresets: PracticePreset[];
 }
 
 export interface PitchSnapshot {

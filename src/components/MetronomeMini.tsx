@@ -5,12 +5,13 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { useRuntimeAudio } from '@/audio/AudioProvider';
 import { useApp } from '@/store/AppProvider';
+import { formatPracticeTime } from '@/lib/practice';
 import { radius } from '@/theme';
 
 export function MetronomeMini({ expanded = false }: { expanded?: boolean }) {
   const router = useRouter();
   const { state, palette } = useApp();
-  const { running, currentBeat, toggleMetronome } = useRuntimeAudio();
+  const { running, currentBeat, countInBarsRemaining, practiceSecondsRemaining, toggleMetronome } = useRuntimeAudio();
   return (
     <View style={[styles.wrap, expanded && styles.expanded, { backgroundColor: palette.surface, borderColor: palette.border }]}>
       <Pressable accessibilityRole="button" accessibilityLabel={running ? 'Stop metronome' : 'Start metronome'} onPress={toggleMetronome} style={[styles.play, { backgroundColor: running ? palette.danger : palette.primary }]}>
@@ -19,6 +20,7 @@ export function MetronomeMini({ expanded = false }: { expanded?: boolean }) {
       <View style={styles.copy}>
         <Text style={[styles.eyebrow, { color: palette.textMuted }]}>METRONOME</Text>
         <Text style={[styles.bpm, { color: palette.text }]}>{state.metronome.bpm} <Text style={styles.unit}>BPM</Text></Text>
+        {running && countInBarsRemaining > 0 ? <Text style={[styles.session, { color: palette.textMuted }]}>IN {countInBarsRemaining}</Text> : running && practiceSecondsRemaining !== null ? <Text style={[styles.session, { color: palette.textMuted }]}>{formatPracticeTime(practiceSecondsRemaining)}</Text> : null}
       </View>
       <View style={styles.beats}>
         {state.metronome.accents.map((accent, index) => (
@@ -43,6 +45,7 @@ const styles = StyleSheet.create({
   eyebrow: { fontSize: 10, fontWeight: '800', letterSpacing: 1 },
   bpm: { fontSize: 24, fontWeight: '900', fontVariant: ['tabular-nums'] },
   unit: { fontSize: 10, fontWeight: '700' },
+  session: { fontSize: 10, fontWeight: '900', fontVariant: ['tabular-nums'] },
   beats: { flex: 1, flexDirection: 'row', gap: 7, justifyContent: 'center', flexWrap: 'wrap' },
   dot: { width: 9, height: 9, borderRadius: 5 },
   open: { minWidth: 48, minHeight: 48, alignItems: 'center', justifyContent: 'center' },

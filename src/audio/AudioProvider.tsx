@@ -6,6 +6,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { Platform } from 'react-native';
 
 import { pulseDurationMs, trainedBpm } from '@/lib/metronome';
+import { practiceClock } from '@/lib/practice';
 import {
   getMetronomeFrameLayout,
   metronomeLoopCacheKey,
@@ -20,6 +21,9 @@ interface AudioContextValue {
   running: boolean;
   currentBeat: number;
   currentSubdivision: number;
+  countInBarsRemaining: number;
+  practiceElapsedSeconds: number;
+  practiceSecondsRemaining: number | null;
   toggleMetronome: () => void;
   stopMetronome: () => void;
   tonePlaying: boolean;
@@ -101,10 +105,14 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
   const [running, setRunning] = useState(false);
   const [currentBeat, setCurrentBeat] = useState(-1);
   const [currentSubdivision, setCurrentSubdivision] = useState(0);
+  const [countInBarsRemaining, setCountInBarsRemaining] = useState(0);
+  const [practiceElapsedSeconds, setPracticeElapsedSeconds] = useState(0);
+  const [practiceSecondsRemaining, setPracticeSecondsRemaining] = useState<number | null>(null);
   const [tonePlaying, setTonePlaying] = useState(false);
 
   const visualTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const visualTickRef = useRef<() => void>(() => undefined);
+  const stopMetronomeRef = useRef<() => void>(() => undefined);
   const resetVisualClockRef = useRef<(settings: MetronomeSettings, anchorMs: number) => void>(() => undefined);
   const configureLoopRef = useRef<(settings: MetronomeSettings) => void>(() => undefined);
   const desiredRunningRef = useRef(false);
@@ -123,6 +131,9 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
   const clockLastPulseRef = useRef(-1);
   const clockLastBarRef = useRef(0);
   const completedBarsRef = useRef(0);
+  const countInRemainingRef = useRef(0);
+  const practiceStartedAtRef = useRef<number | null>(null);
+  const sessionClockStartedRef = useRef(false);
   settingsRef.current = state.metronome;
 
   const metronomePlayerA = useAudioPlayer(null, { updateInterval: 100 });
@@ -168,12 +179,28 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
     const bar = Math.floor(absolutePulse / pulsesPerBar);
 
     if (bar > clockLastBarRef.current) {
-      const previousCompletedBars = completedBarsRef.current;
-      completedBarsRef.current += bar - clockLastBarRef.current;
+      const previousBar = clockLastBarRef.current;
+      const crossedBars = bar - clockLastBarRef.current;
       clockLastBarRef.current = bar;
 
+      const countInBarsCrossed = Math.min(countInRemainingRef.current, crossedBars);
+      countInRemainingRef.current -= countInBarsCrossed;
+      setCountInBarsRemaining(countInRemainingRef.current);
+      if (countInRemainingRef.current === 0 && practiceStartedAtRef.current === null) {
+        practiceStartedAtRef.current = clockAnchorRef.current
+          + (previousBar + countInBarsCrossed) * pulsesPerBar * pulseMs;
+        setPracticeElapsedSeconds(0);
+        setPracticeSecondsRemaining(
+          settingsRef.current.practiceMinutes > 0 ? settingsRef.current.practiceMinutes * 60 : null,
+        );
+      }
+
+      const practiceBarsCrossed = crossedBars - countInBarsCrossed;
+      const previousCompletedBars = completedBarsRef.current;
+      completedBarsRef.current += practiceBarsCrossed;
+
       const liveSettings = settingsRef.current;
-      if (liveSettings.bpm === clockSettings.bpm) {
+      if (practiceBarsCrossed > 0 && liveSettings.bpm === clockSettings.bpm) {
         let nextBpm = liveSettings.bpm;
         for (let completed = previousCompletedBars + 1; completed <= completedBarsRef.current; completed += 1) {
           nextBpm = trainedBpm(nextBpm, completed, liveSettings.trainer);
@@ -184,6 +211,26 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
           updateMetronome({ bpm: nextBpm });
           configureLoopRef.current(nextSettings);
         }
+      }
+    }
+
+    let practiceTimerRemainingMs: number | null = null;
+    if (practiceStartedAtRef.current !== null) {
+      const practiceElapsedMs = Math.max(0, now - practiceStartedAtRef.current);
+      const clock = practiceClock(
+        practiceElapsedMs,
+        1,
+        0,
+        settingsRef.current.practiceMinutes,
+      );
+      setPracticeElapsedSeconds(clock.practiceElapsedSeconds);
+      setPracticeSecondsRemaining(clock.practiceSecondsRemaining);
+      if (clock.finished) {
+        stopMetronomeRef.current();
+        return;
+      }
+      if (settingsRef.current.practiceMinutes > 0) {
+        practiceTimerRemainingMs = settingsRef.current.practiceMinutes * 60_000 - practiceElapsedMs;
       }
     }
 
@@ -214,9 +261,12 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
     }
 
     const nextBoundary = clockAnchorRef.current + (absolutePulse + 1) * pulseMs;
+    const nextPulseDelay = Math.max(1, nextBoundary - performance.now());
     visualTimerRef.current = setTimeout(
       () => visualTickRef.current(),
-      Math.max(1, nextBoundary - performance.now()),
+      practiceTimerRemainingMs === null
+        ? nextPulseDelay
+        : Math.max(1, Math.min(nextPulseDelay, practiceTimerRemainingMs)),
     );
   };
 
@@ -226,6 +276,14 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
     clockAnchorRef.current = anchorMs;
     clockLastPulseRef.current = -1;
     clockLastBarRef.current = 0;
+    if (!sessionClockStartedRef.current) {
+      sessionClockStartedRef.current = true;
+      countInRemainingRef.current = settings.countInBars;
+      practiceStartedAtRef.current = settings.countInBars === 0 ? anchorMs : null;
+      setCountInBarsRemaining(settings.countInBars);
+      setPracticeElapsedSeconds(0);
+      setPracticeSecondsRemaining(settings.practiceMinutes > 0 ? settings.practiceMinutes * 60 : null);
+    }
     visualTickRef.current();
   };
 
@@ -310,8 +368,17 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
     setCurrentBeat(-1);
     setCurrentSubdivision(0);
     completedBarsRef.current = 0;
+    countInRemainingRef.current = 0;
+    practiceStartedAtRef.current = null;
+    sessionClockStartedRef.current = false;
+    setCountInBarsRemaining(settingsRef.current.countInBars);
+    setPracticeElapsedSeconds(0);
+    setPracticeSecondsRemaining(
+      settingsRef.current.practiceMinutes > 0 ? settingsRef.current.practiceMinutes * 60 : null,
+    );
     void deactivateKeepAwake(KEEP_AWAKE_TAG);
   }, []);
+  stopMetronomeRef.current = stopMetronome;
 
   const toggleMetronome = useCallback(() => {
     if (runningRef.current) {
@@ -323,6 +390,14 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
     desiredRunningRef.current = true;
     runningRef.current = true;
     completedBarsRef.current = 0;
+    countInRemainingRef.current = settingsRef.current.countInBars;
+    practiceStartedAtRef.current = null;
+    sessionClockStartedRef.current = false;
+    setCountInBarsRemaining(settingsRef.current.countInBars);
+    setPracticeElapsedSeconds(0);
+    setPracticeSecondsRemaining(
+      settingsRef.current.practiceMinutes > 0 ? settingsRef.current.practiceMinutes * 60 : null,
+    );
     lastRequestedKeyRef.current = null;
     setRunning(true);
     configureLoopRef.current(settingsRef.current);
@@ -333,6 +408,16 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
   useEffect(() => {
     if (running) configureLoopRef.current(settingsRef.current);
   }, [audioSettingsKey, running]);
+
+  useEffect(() => {
+    if (
+      !running
+      || !sessionClockStartedRef.current
+      || practiceStartedAtRef.current === null
+    ) return;
+    if (visualTimerRef.current) clearTimeout(visualTimerRef.current);
+    visualTickRef.current();
+  }, [running, state.metronome.practiceMinutes]);
 
   useEffect(() => {
     if (running && state.metronome.keepAwake) void activateKeepAwakeAsync(KEEP_AWAKE_TAG);
@@ -385,8 +470,30 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
   }, [highTonePlayer, lowTonePlayer, state.tuner.a4, state.tuner.referenceToneMidi, state.tuner.referenceToneVolume, stopTone, tonePlaying]);
 
   const value = useMemo(() => ({
-    running, currentBeat, currentSubdivision, toggleMetronome, stopMetronome, tonePlaying, toggleTone, stopTone,
-  }), [running, currentBeat, currentSubdivision, toggleMetronome, stopMetronome, tonePlaying, toggleTone, stopTone]);
+    running,
+    currentBeat,
+    currentSubdivision,
+    countInBarsRemaining,
+    practiceElapsedSeconds,
+    practiceSecondsRemaining,
+    toggleMetronome,
+    stopMetronome,
+    tonePlaying,
+    toggleTone,
+    stopTone,
+  }), [
+    running,
+    currentBeat,
+    currentSubdivision,
+    countInBarsRemaining,
+    practiceElapsedSeconds,
+    practiceSecondsRemaining,
+    toggleMetronome,
+    stopMetronome,
+    tonePlaying,
+    toggleTone,
+    stopTone,
+  ]);
 
   return <AudioContext.Provider value={value}>{children}</AudioContext.Provider>;
 }

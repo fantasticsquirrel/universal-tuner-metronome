@@ -1,4 +1,4 @@
-import { analyzeFrequency, centsBetween, frequencyToMidi, midiToFrequency, midiToNote, writtenNote } from '../pitch';
+import { adjustedTargetMidi, analyzeFrequency, centsBetween, frequencyToMidi, midiToFrequency, midiToNote, minimumConfidence, writtenNote, yinThreshold } from '../pitch';
 
 describe('pitch math', () => {
   it('round-trips MIDI and frequency across the useful range', () => {
@@ -18,5 +18,18 @@ describe('pitch math', () => {
     expect(writtenNote(70, 2)).toEqual({ name: 'C', octave: 5 });
     expect(writtenNote(63, 9)).toEqual({ name: 'C', octave: 5 });
     expect(writtenNote(65, 7)).toEqual({ name: 'C', octave: 5 });
+  });
+
+  it('applies capo and whole-instrument detune to guided targets', () => {
+    expect(adjustedTargetMidi(40, 2, -1)).toBe(41);
+    expect(adjustedTargetMidi(127, 12, 0)).toBe(127);
+    expect(adjustedTargetMidi(0, 0, -12)).toBe(0);
+  });
+
+  it('maps sensitivity to permissive detector thresholds', () => {
+    expect(minimumConfidence(100)).toBeLessThan(minimumConfidence(0));
+    expect(yinThreshold(100)).toBeGreaterThan(yinThreshold(0));
+    expect(minimumConfidence(-20)).toBe(minimumConfidence(0));
+    expect(yinThreshold(120)).toBe(yinThreshold(100));
   });
 });

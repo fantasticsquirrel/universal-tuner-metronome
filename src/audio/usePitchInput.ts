@@ -7,11 +7,12 @@ import {
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { detectPitchYin } from '@/lib/yin';
+import { yinThreshold } from '@/lib/pitch';
 import type { DetectorProfile, PermissionState, PitchSnapshot } from '@/types';
 
 const SAMPLE_RATE = 48_000;
 
-export function usePitchInput(profile: DetectorProfile) {
+export function usePitchInput(profile: DetectorProfile, sensitivity: number, noiseGate: number) {
   const { startRecording, stopRecording, isRecording } = useAudioRecorder();
   const [permission, setPermission] = useState<PermissionState>('checking');
   const [snapshot, setSnapshot] = useState<PitchSnapshot | null>(null);
@@ -49,9 +50,14 @@ export function usePitchInput(profile: DetectorProfile) {
     const frame = new Float32Array(ring.length);
     frame.set(ring.subarray(writeRef.current));
     frame.set(ring.subarray(0, writeRef.current), ring.length - writeRef.current);
-    const result = detectPitchYin(frame, { sampleRate: SAMPLE_RATE, profile });
+    const result = detectPitchYin(frame, {
+      sampleRate: SAMPLE_RATE,
+      profile,
+      threshold: yinThreshold(sensitivity),
+      minimumRms: noiseGate,
+    });
     setSnapshot(result);
-  }, [profile]);
+  }, [noiseGate, profile, sensitivity]);
 
   const start = useCallback(async () => {
     setError(null);

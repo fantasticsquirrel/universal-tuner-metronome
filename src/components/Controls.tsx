@@ -53,16 +53,20 @@ export function IconButton({ icon, label, onPress, selected = false, disabled = 
   );
 }
 
-export function PillButton({ label, onPress, selected = false, icon }: {
+export function PillButton({ label, onPress, selected = false, icon, accessibilityLabel, accessibilityHint }: {
   label: string;
   onPress: () => void;
   selected?: boolean;
   icon?: keyof typeof Ionicons.glyphMap;
+  accessibilityLabel?: string;
+  accessibilityHint?: string;
 }) {
   const { palette } = useApp();
   return (
     <Pressable
       accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel}
+      accessibilityHint={accessibilityHint}
       accessibilityState={{ selected }}
       onPress={onPress}
       style={({ pressed }) => [styles.pill, {
@@ -141,11 +145,17 @@ export function Sheet({ visible, title, onClose, children }: React.PropsWithChil
   const { palette } = useApp();
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={styles.scrim} onPress={onClose} accessibilityLabel="Close dialog" />
-      <SafeAreaView style={[styles.sheet, { backgroundColor: palette.surface }]} edges={['bottom']}>
+      <Pressable accessible={false} style={styles.scrim} onPress={onClose} />
+      <SafeAreaView
+        accessibilityViewIsModal
+        accessibilityLabel={title}
+        onAccessibilityEscape={onClose}
+        style={[styles.sheet, { backgroundColor: palette.surface }]}
+        edges={['bottom']}
+      >
         <View style={[styles.sheetHandle, { backgroundColor: palette.border }]} />
         <View style={styles.sheetHeader}>
-          <Text style={[styles.sheetTitle, { color: palette.text }]}>{title}</Text>
+          <Text accessibilityRole="header" style={[styles.sheetTitle, { color: palette.text }]}>{title}</Text>
           <IconButton icon="close" label={`Close ${title}`} onPress={onClose} />
         </View>
         <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.sheetContent}>{children}</ScrollView>

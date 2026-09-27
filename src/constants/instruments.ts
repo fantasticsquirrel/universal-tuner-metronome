@@ -1,6 +1,6 @@
 import type { InstrumentPreset, TuningPreset } from '@/types';
 
-const tuning = (id: string, name: string, notes: Array<[string, number]>): TuningPreset => ({
+const tuning = (id: string, name: string, notes: [string, number][]): TuningPreset => ({
   id,
   name,
   targets: notes.map(([label, midi]) => ({ label, midi })),
@@ -84,8 +84,12 @@ export const TRANSPOSITIONS = [
   { label: 'G', semitones: 5 },
 ] as const;
 
-export function findInstrument(id: string): InstrumentPreset {
-  return INSTRUMENTS.find((item) => item.id === id) ?? INSTRUMENTS[0]!;
+export function allInstruments(customInstruments: InstrumentPreset[] = []): InstrumentPreset[] {
+  return [...INSTRUMENTS, ...customInstruments];
+}
+
+export function findInstrument(id: string, customInstruments: InstrumentPreset[] = []): InstrumentPreset {
+  return allInstruments(customInstruments).find((item) => item.id === id) ?? INSTRUMENTS[0]!;
 }
 
 export function findTuning(instrument: InstrumentPreset, id: string): TuningPreset | undefined {
