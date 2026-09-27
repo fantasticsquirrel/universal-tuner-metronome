@@ -12,8 +12,9 @@ import {
   classifyRecordingInterruption,
   recordingInterruptionMessage,
 } from '@/lib/audioInputState';
+import { audioStreamSamples } from '@/audio/audioStream';
 import { detectPitchYin } from '@/lib/yin';
-import { yinThreshold } from '@/lib/pitch';
+import { effectiveNoiseGate, yinThreshold } from '@/lib/pitch';
 import type { DetectorProfile, PermissionState, PitchSnapshot } from '@/types';
 
 const SAMPLE_RATE = 48_000;
@@ -44,10 +45,15 @@ export function usePitchInput(
   const lastAudioAtRef = useRef(0);
   const interruptionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const errorSourceRef = useRef<'start' | 'interruption' | null>(null);
+  const detectorSettingsRef = useRef({ profile, sensitivity, noiseGate });
 
   useEffect(() => {
     appPlaybackActiveRef.current = appPlaybackActive;
   }, [appPlaybackActive]);
+
+  useEffect(() => {
+    detectorSettingsRef.current = { profile, sensitivity, noiseGate };
+  }, [noiseGate, profile, sensitivity]);
 
   const clearInterruptionTimer = useCallback(() => {
     if (interruptionTimerRef.current) clearTimeout(interruptionTimerRef.current);
@@ -104,7 +110,8 @@ export function usePitchInput(
   const onAudioStream = useCallback(async (event: AudioDataEvent) => {
     lastAudioAtRef.current = Date.now();
     clearInterruptionProblem();
-    const incoming = event.data instanceof Float32Array ? event.data : new Float32Array(event.data as ArrayLike<number>);
+    const incoming = audioStreamSamples(event);
+    if (incoming.length === 0) return;
     const ring = ringRef.current;
     for (let index = 0; index < incoming.length; index += 1) {
       ring[writeRef.current] = incoming[index]!;
@@ -117,14 +124,18 @@ export function usePitchInput(
     const frame = new Float32Array(ring.length);
     frame.set(ring.subarray(writeRef.current));
     frame.set(ring.subarray(0, writeRef.current), ring.length - writeRef.current);
+    const detectorSettings = detectorSettingsRef.current;
     const result = detectPitchYin(frame, {
       sampleRate: SAMPLE_RATE,
-      profile,
-      threshold: yinThreshold(sensitivity),
-      minimumRms: noiseGate,
+      profile: detectorSettings.profile,
+      threshold: yinThreshold(detectorSettings.sensitivity),
+      minimumRms: effectiveNoiseGate(
+        detectorSettings.noiseGate,
+        detectorSettings.sensitivity,
+      ),
     });
     setSnapshot(result);
-  }, [clearInterruptionProblem, noiseGate, profile, sensitivity]);
+  }, [clearInterruptionProblem]);
 
   const onRecordingInterrupted = useCallback((event: RecordingInterruptionEvent) => {
     if (!desiredListeningRef.current) return;

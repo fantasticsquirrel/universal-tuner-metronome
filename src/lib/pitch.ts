@@ -63,6 +63,13 @@ export function yinThreshold(sensitivity: number): number {
   return 0.08 + normalized * 0.17;
 }
 
+export function effectiveNoiseGate(noiseGate: number, sensitivity: number): number {
+  const normalized = Math.max(0, Math.min(100, sensitivity)) / 100;
+  // Sensitivity must affect the amplitude gate as well as YIN's clarity gates;
+  // otherwise a low-gain microphone is rejected before pitch analysis can run.
+  return Math.max(0, noiseGate) * Math.max(0.1, 1 - normalized);
+}
+
 export function clampCents(cents: number, limit = 50): number {
   return Math.max(-limit, Math.min(limit, cents));
 }

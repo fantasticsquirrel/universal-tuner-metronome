@@ -1,4 +1,4 @@
-import { adjustedTargetMidi, analyzeFrequency, centsBetween, frequencyToMidi, midiToFrequency, midiToNote, minimumConfidence, writtenNote, yinThreshold } from '../pitch';
+import { adjustedTargetMidi, analyzeFrequency, centsBetween, effectiveNoiseGate, frequencyToMidi, midiToFrequency, midiToNote, minimumConfidence, writtenNote, yinThreshold } from '../pitch';
 
 describe('pitch math', () => {
   it('round-trips MIDI and frequency across the useful range', () => {
@@ -29,6 +29,8 @@ describe('pitch math', () => {
   it('maps sensitivity to permissive detector thresholds', () => {
     expect(minimumConfidence(100)).toBeLessThan(minimumConfidence(0));
     expect(yinThreshold(100)).toBeGreaterThan(yinThreshold(0));
+    expect(effectiveNoiseGate(0.008, 65)).toBeCloseTo(0.0028);
+    expect(effectiveNoiseGate(0.008, 100)).toBeCloseTo(0.0008);
     expect(minimumConfidence(-20)).toBe(minimumConfidence(0));
     expect(yinThreshold(120)).toBe(yinThreshold(100));
   });
