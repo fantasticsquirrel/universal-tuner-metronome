@@ -13,11 +13,13 @@ import {
   recordingInterruptionMessage,
 } from '@/lib/audioInputState';
 import { audioStreamSamples } from '@/audio/audioStream';
-import { detectPitchYin } from '@/lib/yin';
-import { effectiveNoiseGate, yinThreshold } from '@/lib/pitch';
+import { detectPitchYin, pitchFrameSize } from '@/lib/yin';
+import { effectiveNoiseGate, minimumConfidence, yinThreshold } from '@/lib/pitch';
+import { PitchTracker } from '@/lib/pitchTracker';
 import type { DetectorProfile, PermissionState, PitchSnapshot } from '@/types';
 
 const SAMPLE_RATE = 48_000;
+const ANALYSIS_INTERVAL_MS = 50;
 const INTERRUPTION_GRACE_MS = 2_000;
 
 export function usePitchInput(
@@ -36,10 +38,13 @@ export function usePitchInput(
   const [permission, setPermission] = useState<PermissionState>('checking');
   const [snapshot, setSnapshot] = useState<PitchSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const ringRef = useRef(new Float32Array(profile === 'low' ? 8192 : 4096));
+  const ringRef = useRef(new Float32Array(pitchFrameSize(profile)));
   const writeRef = useRef(0);
   const filledRef = useRef(0);
   const lastAnalysisRef = useRef(0);
+  const analysisTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const snapshotExpiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pitchTrackerRef = useRef(new PitchTracker());
   const desiredListeningRef = useRef(false);
   const appPlaybackActiveRef = useRef(appPlaybackActive);
   const lastAudioAtRef = useRef(0);
@@ -86,9 +91,13 @@ export function usePitchInput(
   }, [clearInterruptionTimer, setInputProblem]);
 
   useEffect(() => {
-    ringRef.current = new Float32Array(profile === 'low' ? 8192 : 4096);
+    ringRef.current = new Float32Array(pitchFrameSize(profile));
     writeRef.current = 0;
     filledRef.current = 0;
+    lastAnalysisRef.current = 0;
+    pitchTrackerRef.current.reset();
+    const clearSnapshotTimer = setTimeout(() => setSnapshot(null), 0);
+    return () => clearTimeout(clearSnapshotTimer);
   }, [profile]);
 
   const refreshPermission = useCallback(() => {
@@ -107,20 +116,44 @@ export function usePitchInput(
     return () => subscription.remove();
   }, [refreshPermission]);
 
-  const onAudioStream = useCallback(async (event: AudioDataEvent) => {
-    lastAudioAtRef.current = Date.now();
-    clearInterruptionProblem();
-    const incoming = audioStreamSamples(event);
-    if (incoming.length === 0) return;
-    const ring = ringRef.current;
-    for (let index = 0; index < incoming.length; index += 1) {
-      ring[writeRef.current] = incoming[index]!;
-      writeRef.current = (writeRef.current + 1) % ring.length;
-      filledRef.current = Math.min(ring.length, filledRef.current + 1);
-    }
+  const clearAnalysisTimers = useCallback(() => {
+    if (analysisTimerRef.current) clearTimeout(analysisTimerRef.current);
+    if (snapshotExpiryTimerRef.current) clearTimeout(snapshotExpiryTimerRef.current);
+    analysisTimerRef.current = null;
+    snapshotExpiryTimerRef.current = null;
+  }, []);
+
+  const publishTrackedSnapshot = useCallback((result: PitchSnapshot | null) => {
+    if (snapshotExpiryTimerRef.current) clearTimeout(snapshotExpiryTimerRef.current);
+    snapshotExpiryTimerRef.current = null;
+
     const now = Date.now();
-    if (filledRef.current < ring.length || now - lastAnalysisRef.current < 90) return;
-    lastAnalysisRef.current = now;
+    const tracked = pitchTrackerRef.current.update(
+      result,
+      now,
+      minimumConfidence(detectorSettingsRef.current.sensitivity),
+    );
+    setSnapshot(tracked.snapshot);
+
+    if (tracked.expiresAt !== null) {
+      snapshotExpiryTimerRef.current = setTimeout(() => {
+        snapshotExpiryTimerRef.current = null;
+        const expired = pitchTrackerRef.current.update(
+          null,
+          Date.now(),
+          minimumConfidence(detectorSettingsRef.current.sensitivity),
+        );
+        setSnapshot(expired.snapshot);
+      }, Math.max(1, tracked.expiresAt - now + 1));
+    }
+  }, []);
+
+  const analyzeLatestFrame = useCallback(() => {
+    analysisTimerRef.current = null;
+    if (!desiredListeningRef.current) return;
+    const ring = ringRef.current;
+    if (filledRef.current < ring.length) return;
+    lastAnalysisRef.current = Date.now();
     const frame = new Float32Array(ring.length);
     frame.set(ring.subarray(writeRef.current));
     frame.set(ring.subarray(0, writeRef.current), ring.length - writeRef.current);
@@ -134,8 +167,32 @@ export function usePitchInput(
         detectorSettings.sensitivity,
       ),
     });
-    setSnapshot(result);
-  }, [clearInterruptionProblem]);
+    publishTrackedSnapshot(result);
+  }, [publishTrackedSnapshot]);
+
+  const onAudioStream = useCallback(async (event: AudioDataEvent) => {
+    if (!desiredListeningRef.current) return;
+    lastAudioAtRef.current = Date.now();
+    clearInterruptionProblem();
+    const incoming = audioStreamSamples(event);
+    if (incoming.length === 0) return;
+    const ring = ringRef.current;
+    for (let index = 0; index < incoming.length; index += 1) {
+      ring[writeRef.current] = incoming[index]!;
+      writeRef.current = (writeRef.current + 1) % ring.length;
+      filledRef.current = Math.min(ring.length, filledRef.current + 1);
+    }
+    if (filledRef.current < ring.length || analysisTimerRef.current) return;
+
+    // Run outside the native stream callback and keep only one pending job.
+    // If JS is busy, later audio callbacks update the ring and the scheduled
+    // analysis consumes the newest frame instead of building a stale queue.
+    const delay = Math.max(
+      0,
+      ANALYSIS_INTERVAL_MS - (Date.now() - lastAnalysisRef.current),
+    );
+    analysisTimerRef.current = setTimeout(analyzeLatestFrame, delay);
+  }, [analyzeLatestFrame, clearInterruptionProblem]);
 
   const onRecordingInterrupted = useCallback((event: RecordingInterruptionEvent) => {
     if (!desiredListeningRef.current) return;
@@ -169,6 +226,12 @@ export function usePitchInput(
   const start = useCallback(async () => {
     desiredListeningRef.current = true;
     clearInterruptionTimer();
+    clearAnalysisTimers();
+    pitchTrackerRef.current.reset();
+    writeRef.current = 0;
+    filledRef.current = 0;
+    lastAnalysisRef.current = 0;
+    setSnapshot(null);
     const recoveringFromProblem = errorSourceRef.current !== null;
     errorSourceRef.current = null;
     setError(null);
@@ -197,8 +260,8 @@ export function usePitchInput(
         channels: 1,
         encoding: 'pcm_16bit',
         streamFormat: 'float32',
-        interval: 100,
-        bufferDurationSeconds: 0.1,
+        interval: 50,
+        bufferDurationSeconds: 0.02,
         keepFullAnalysis: false,
         keepAwake: false,
         output: { primary: { enabled: false } },
@@ -222,11 +285,17 @@ export function usePitchInput(
         'start',
       );
     }
-  }, [clearInterruptionTimer, isPaused, isRecording, onAudioStream, onRecordingInterrupted, resumeRecording, setInputProblem, startRecording, stopRecording]);
+  }, [clearAnalysisTimers, clearInterruptionTimer, isPaused, isRecording, onAudioStream, onRecordingInterrupted, resumeRecording, setInputProblem, startRecording, stopRecording]);
 
   const stop = useCallback(async () => {
     desiredListeningRef.current = false;
     clearInterruptionTimer();
+    clearAnalysisTimers();
+    pitchTrackerRef.current.reset();
+    writeRef.current = 0;
+    filledRef.current = 0;
+    lastAnalysisRef.current = 0;
+    setSnapshot(null);
     errorSourceRef.current = null;
     setError(null);
     if (!isRecording && !isPaused) return;
@@ -235,13 +304,14 @@ export function usePitchInput(
     } catch {
       // The native recorder may already be stopped after a route interruption.
     }
-  }, [clearInterruptionTimer, isPaused, isRecording, stopRecording]);
+  }, [clearAnalysisTimers, clearInterruptionTimer, isPaused, isRecording, stopRecording]);
 
   useEffect(() => () => {
     desiredListeningRef.current = false;
     clearInterruptionTimer();
+    clearAnalysisTimers();
     void stopRecording().catch(() => undefined);
-  }, [clearInterruptionTimer, stopRecording]);
+  }, [clearAnalysisTimers, clearInterruptionTimer, stopRecording]);
 
   return { permission, snapshot, error, isListening: isRecording, start, stop };
 }
