@@ -6,6 +6,17 @@ import type { PitchSnapshot } from '@/types';
 
 const mockStartRecording = jest.fn().mockResolvedValue(undefined);
 const mockStopRecording = jest.fn().mockResolvedValue(undefined);
+jest.mock('@/audio/nativePitchInput', () => ({
+  nativePitchInput: {
+    available: false,
+    start: jest.fn().mockResolvedValue(undefined),
+    stop: jest.fn().mockResolvedValue(undefined),
+    isRunning: jest.fn().mockReturnValue(false),
+    updateSettings: jest.fn().mockResolvedValue(undefined),
+    addPitchListener: jest.fn(),
+    addErrorListener: jest.fn(),
+  },
+}));
 jest.mock('@siteed/audio-studio', () => ({
   AudioStudioModule: {
     getPermissionsAsync: jest.fn().mockResolvedValue({ granted: true }),
@@ -45,6 +56,24 @@ const { act, create } = jest.requireActual('react-test-renderer') as {
 const yinMock = jest.requireMock('@/lib/yin') as {
   detectPitchYin: jest.Mock<PitchSnapshot | null, [Float32Array]>;
 };
+const audioStudioMock = jest.requireMock('@siteed/audio-studio') as {
+  AudioStudioModule: {
+    requestPermissionsAsync: jest.Mock<Promise<{ granted: boolean }>, []>;
+  };
+};
+const mockRequestPermissions = audioStudioMock.AudioStudioModule.requestPermissionsAsync;
+const nativePitchModuleMock = jest.requireMock('@/audio/nativePitchInput') as {
+  nativePitchInput: {
+    available: boolean;
+    start: jest.Mock;
+    stop: jest.Mock;
+    isRunning: jest.Mock;
+    updateSettings: jest.Mock;
+    addPitchListener: jest.Mock;
+    addErrorListener: jest.Mock;
+  };
+};
+const mockNativePitchInput = nativePitchModuleMock.nativePitchInput;
 
 function event(samples: Float32Array): AudioDataEvent {
   return {
@@ -60,6 +89,7 @@ function event(samples: Float32Array): AudioDataEvent {
 describe('live pitch input scheduling', () => {
   let renderer: Renderer | null = null;
   let pitchInput: ReturnType<typeof usePitchInput> | null = null;
+  let nativePitchListener: ((snapshot: PitchSnapshot | null) => void) | null = null;
 
   function Capture() {
     pitchInput = usePitchInput('general', 65, 0.008);
@@ -73,11 +103,15 @@ describe('live pitch input scheduling', () => {
   beforeEach(async () => {
     jest.useFakeTimers();
     jest.clearAllMocks();
+    mockNativePitchInput.available = false;
+    nativePitchListener = null;
+    mockNativePitchInput.addPitchListener.mockImplementation((listener) => {
+      nativePitchListener = listener;
+      return { remove: jest.fn() };
+    });
+    mockNativePitchInput.addErrorListener.mockReturnValue({ remove: jest.fn() });
     await act(async () => {
       renderer = create(React.createElement(Capture));
-    });
-    await act(async () => {
-      await pitchInput!.start();
     });
   });
 
@@ -89,6 +123,9 @@ describe('live pitch input scheduling', () => {
   });
 
   it('uses short recorder buffers and coalesces queued input into the newest frame', async () => {
+    await act(async () => {
+      await pitchInput!.start();
+    });
     const config = mockStartRecording.mock.calls[0]![0] as RecordingConfig;
     expect(config.interval).toBe(50);
     expect(config.bufferDurationSeconds).toBe(0.02);
@@ -106,5 +143,102 @@ describe('live pitch input scheduling', () => {
     const analyzed = yinMock.detectPitchYin.mock.calls[0]![0];
     expect(analyzed[0]).toBeCloseTo(0.2);
     expect(analyzed[analyzed.length - 1]).toBeCloseTo(0.2);
+  });
+
+  it('does not start capture when Stop wins a pending permission request', async () => {
+    let resolvePermission!: (result: { granted: boolean }) => void;
+    mockRequestPermissions.mockImplementationOnce(() => new Promise((resolve) => {
+      resolvePermission = resolve;
+    }));
+
+    let startPromise!: Promise<void>;
+    await act(async () => {
+      startPromise = pitchInput!.start();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await pitchInput!.stop();
+    });
+    await act(async () => {
+      resolvePermission({ granted: true });
+      await startPromise;
+    });
+
+    expect(mockStartRecording).not.toHaveBeenCalled();
+  });
+
+  it('stops a recorder start that finishes after the input was cancelled', async () => {
+    let resolveNativeStart!: () => void;
+    mockStartRecording.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      resolveNativeStart = resolve;
+    }));
+
+    let startPromise!: Promise<void>;
+    await act(async () => {
+      startPromise = pitchInput!.start();
+      await Promise.resolve();
+    });
+    const config = mockStartRecording.mock.calls[0]![0] as RecordingConfig;
+
+    await act(async () => {
+      await pitchInput!.stop();
+    });
+    await act(async () => {
+      resolveNativeStart();
+      await startPromise;
+      await config.onAudioStream!(event(new Float32Array(4096).fill(0.3)));
+      jest.runOnlyPendingTimers();
+    });
+
+    expect(mockStopRecording).toHaveBeenCalledTimes(2);
+    expect(yinMock.detectPitchYin).not.toHaveBeenCalled();
+  });
+
+  it('cancels queued pitch work immediately on Stop', async () => {
+    await act(async () => {
+      await pitchInput!.start();
+    });
+    const config = mockStartRecording.mock.calls[0]![0] as RecordingConfig;
+    await act(async () => {
+      await config.onAudioStream!(event(new Float32Array(4096).fill(0.1)));
+      await pitchInput!.stop();
+      jest.runOnlyPendingTimers();
+    });
+
+    expect(yinMock.detectPitchYin).not.toHaveBeenCalled();
+  });
+
+  it('keeps Android PCM and pitch analysis native instead of bridging sample buffers', async () => {
+    await act(async () => renderer?.unmount());
+    mockNativePitchInput.available = true;
+    await act(async () => {
+      renderer = create(React.createElement(Capture));
+    });
+
+    await act(async () => {
+      await pitchInput!.start();
+    });
+
+    expect(mockStartRecording).not.toHaveBeenCalled();
+    expect(mockNativePitchInput.start).toHaveBeenCalledTimes(1);
+    const settings = mockNativePitchInput.start.mock.calls[0]![0];
+    expect(settings).toEqual({
+      profile: 'general',
+      threshold: expect.any(Number),
+      minimumRms: expect.any(Number),
+    });
+    expect(JSON.stringify(settings).length).toBeLessThan(100);
+
+    await act(async () => {
+      nativePitchListener?.({
+        frequency: 440,
+        confidence: 0.99,
+        rms: 0.01,
+        clipping: false,
+        timestamp: Date.now(),
+      });
+    });
+    expect(pitchInput!.snapshot?.frequency).toBe(440);
+    expect(yinMock.detectPitchYin).not.toHaveBeenCalled();
   });
 });

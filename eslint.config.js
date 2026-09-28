@@ -5,6 +5,8 @@ module.exports = defineConfig([
   expoConfig,
   {
     ignores: ['dist/**', '.expo/**', 'coverage/**'],
+  },
+  {
     rules: { 'react-hooks/exhaustive-deps': 'warn' }
   },
   {

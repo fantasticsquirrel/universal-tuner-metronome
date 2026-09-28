@@ -69,16 +69,21 @@ describe('YIN detector', () => {
     expect(Math.abs(detected!.frequency - frequency)).toBeLessThan(0.15);
   });
 
-  it('bounds low-profile YIN work while retaining the full observation window', () => {
-    const frameSize = pitchFrameSize('low');
-    const prepared = preparePitchAnalysis(new Float32Array(frameSize), 48_000, 'low');
-    const approximateComparisons = prepared.samples.length
-      * Math.ceil(prepared.sampleRate / 25);
+  it.each([
+    ['low', 25, 8192, 12_000, 1_000_000],
+    ['general', 48, 4096, 24_000, 1_100_000],
+    ['high', 150, 2048, 24_000, 200_000],
+  ] as const)(
+    'bounds %s-profile YIN work while retaining its observation window',
+    (profile, minimumFrequency, frameSize, analysisRate, workBudget) => {
+      const prepared = preparePitchAnalysis(new Float32Array(frameSize), 48_000, profile);
+      const approximateComparisons = prepared.samples.length
+        * Math.ceil(prepared.sampleRate / minimumFrequency);
 
-    expect(frameSize).toBe(8192);
-    expect(prepared.downsampleFactor).toBe(4);
-    expect(prepared.sampleRate).toBe(12_000);
-    expect(prepared.samples).toHaveLength(2048);
-    expect(approximateComparisons).toBeLessThan(1_000_000);
-  });
+      expect(pitchFrameSize(profile)).toBe(frameSize);
+      expect(prepared.sampleRate).toBe(analysisRate);
+      expect(prepared.samples.length).toBeLessThan(frameSize);
+      expect(approximateComparisons).toBeLessThan(workBudget);
+    },
+  );
 });

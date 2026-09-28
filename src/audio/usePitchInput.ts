@@ -13,6 +13,8 @@ import {
   recordingInterruptionMessage,
 } from '@/lib/audioInputState';
 import { audioStreamSamples } from '@/audio/audioStream';
+import { nativePitchInput, type NativePitchSettings } from '@/audio/nativePitchInput';
+import { PitchFrameBuffer } from '@/audio/pitchFrameBuffer';
 import { detectPitchYin, pitchFrameSize } from '@/lib/yin';
 import { effectiveNoiseGate, minimumConfidence, yinThreshold } from '@/lib/pitch';
 import { PitchTracker } from '@/lib/pitchTracker';
@@ -21,6 +23,18 @@ import type { DetectorProfile, PermissionState, PitchSnapshot } from '@/types';
 const SAMPLE_RATE = 48_000;
 const ANALYSIS_INTERVAL_MS = 50;
 const INTERRUPTION_GRACE_MS = 2_000;
+
+function detectorSettings(
+  profile: DetectorProfile,
+  sensitivity: number,
+  noiseGate: number,
+): NativePitchSettings {
+  return {
+    profile,
+    threshold: yinThreshold(sensitivity),
+    minimumRms: effectiveNoiseGate(noiseGate, sensitivity),
+  };
+}
 
 export function usePitchInput(
   profile: DetectorProfile,
@@ -38,13 +52,13 @@ export function usePitchInput(
   const [permission, setPermission] = useState<PermissionState>('checking');
   const [snapshot, setSnapshot] = useState<PitchSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const ringRef = useRef(new Float32Array(pitchFrameSize(profile)));
-  const writeRef = useRef(0);
-  const filledRef = useRef(0);
+  const [nativeListening, setNativeListening] = useState(false);
+  const frameBufferRef = useRef(new PitchFrameBuffer(pitchFrameSize(profile)));
   const lastAnalysisRef = useRef(0);
   const analysisTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const snapshotExpiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pitchTrackerRef = useRef(new PitchTracker());
+  const inputOperationRef = useRef(0);
   const desiredListeningRef = useRef(false);
   const appPlaybackActiveRef = useRef(appPlaybackActive);
   const lastAudioAtRef = useRef(0);
@@ -90,15 +104,21 @@ export function usePitchInput(
     }, INTERRUPTION_GRACE_MS);
   }, [clearInterruptionTimer, setInputProblem]);
 
+  const clearAnalysisTimers = useCallback(() => {
+    if (analysisTimerRef.current) clearTimeout(analysisTimerRef.current);
+    if (snapshotExpiryTimerRef.current) clearTimeout(snapshotExpiryTimerRef.current);
+    analysisTimerRef.current = null;
+    snapshotExpiryTimerRef.current = null;
+  }, []);
+
   useEffect(() => {
-    ringRef.current = new Float32Array(pitchFrameSize(profile));
-    writeRef.current = 0;
-    filledRef.current = 0;
+    clearAnalysisTimers();
+    frameBufferRef.current = new PitchFrameBuffer(pitchFrameSize(profile));
     lastAnalysisRef.current = 0;
     pitchTrackerRef.current.reset();
     const clearSnapshotTimer = setTimeout(() => setSnapshot(null), 0);
     return () => clearTimeout(clearSnapshotTimer);
-  }, [profile]);
+  }, [clearAnalysisTimers, profile]);
 
   const refreshPermission = useCallback(() => {
     void AudioStudioModule.getPermissionsAsync()
@@ -111,17 +131,50 @@ export function usePitchInput(
   useEffect(() => {
     refreshPermission();
     const subscription = AppState.addEventListener('change', (nextState) => {
-      if (nextState === 'active') refreshPermission();
+      if (nextState !== 'active') {
+        if (nativePitchInput.available && desiredListeningRef.current) {
+          inputOperationRef.current += 1;
+          setNativeListening(false);
+          clearAnalysisTimers();
+          pitchTrackerRef.current.reset();
+          setSnapshot(null);
+          void nativePitchInput.stop().catch(() => undefined);
+        }
+        return;
+      }
+
+      refreshPermission();
+      if (
+        !nativePitchInput.available
+        || !desiredListeningRef.current
+        || nativePitchInput.isRunning()
+      ) return;
+
+      const operation = inputOperationRef.current + 1;
+      inputOperationRef.current = operation;
+      const settings = detectorSettingsRef.current;
+      void nativePitchInput
+        .start(detectorSettings(settings.profile, settings.sensitivity, settings.noiseGate))
+        .then(() => {
+          if (operation !== inputOperationRef.current || !desiredListeningRef.current) {
+            return nativePitchInput.stop();
+          }
+          setNativeListening(true);
+          clearInterruptionProblem();
+          return undefined;
+        })
+        .catch((caught) => {
+          if (operation !== inputOperationRef.current || !desiredListeningRef.current) return;
+          desiredListeningRef.current = false;
+          setNativeListening(false);
+          setInputProblem(
+            caught instanceof Error ? caught.message : 'Microphone input could not be resumed.',
+            'interruption',
+          );
+        });
     });
     return () => subscription.remove();
-  }, [refreshPermission]);
-
-  const clearAnalysisTimers = useCallback(() => {
-    if (analysisTimerRef.current) clearTimeout(analysisTimerRef.current);
-    if (snapshotExpiryTimerRef.current) clearTimeout(snapshotExpiryTimerRef.current);
-    analysisTimerRef.current = null;
-    snapshotExpiryTimerRef.current = null;
-  }, []);
+  }, [clearAnalysisTimers, clearInterruptionProblem, refreshPermission, setInputProblem]);
 
   const publishTrackedSnapshot = useCallback((result: PitchSnapshot | null) => {
     if (snapshotExpiryTimerRef.current) clearTimeout(snapshotExpiryTimerRef.current);
@@ -148,15 +201,41 @@ export function usePitchInput(
     }
   }, []);
 
+  useEffect(() => {
+    if (!nativePitchInput.available) return undefined;
+    const pitchSubscription = nativePitchInput.addPitchListener((result) => {
+      if (!desiredListeningRef.current) return;
+      lastAudioAtRef.current = Date.now();
+      clearInterruptionProblem();
+      publishTrackedSnapshot(result);
+    });
+    const errorSubscription = nativePitchInput.addErrorListener((message) => {
+      desiredListeningRef.current = false;
+      setNativeListening(false);
+      setInputProblem(message, 'interruption');
+    });
+    return () => {
+      pitchSubscription?.remove();
+      errorSubscription?.remove();
+    };
+  }, [clearInterruptionProblem, publishTrackedSnapshot, setInputProblem]);
+
+  useEffect(() => {
+    if (!nativePitchInput.available || !nativeListening) return;
+    void nativePitchInput
+      .updateSettings(detectorSettings(profile, sensitivity, noiseGate))
+      .catch((caught) => setInputProblem(
+        caught instanceof Error ? caught.message : 'Pitch detector settings could not be updated.',
+        'interruption',
+      ));
+  }, [nativeListening, noiseGate, profile, sensitivity, setInputProblem]);
+
   const analyzeLatestFrame = useCallback(() => {
     analysisTimerRef.current = null;
     if (!desiredListeningRef.current) return;
-    const ring = ringRef.current;
-    if (filledRef.current < ring.length) return;
+    const frame = frameBufferRef.current.latest();
+    if (!frame) return;
     lastAnalysisRef.current = Date.now();
-    const frame = new Float32Array(ring.length);
-    frame.set(ring.subarray(writeRef.current));
-    frame.set(ring.subarray(0, writeRef.current), ring.length - writeRef.current);
     const detectorSettings = detectorSettingsRef.current;
     const result = detectPitchYin(frame, {
       sampleRate: SAMPLE_RATE,
@@ -176,13 +255,8 @@ export function usePitchInput(
     clearInterruptionProblem();
     const incoming = audioStreamSamples(event);
     if (incoming.length === 0) return;
-    const ring = ringRef.current;
-    for (let index = 0; index < incoming.length; index += 1) {
-      ring[writeRef.current] = incoming[index]!;
-      writeRef.current = (writeRef.current + 1) % ring.length;
-      filledRef.current = Math.min(ring.length, filledRef.current + 1);
-    }
-    if (filledRef.current < ring.length || analysisTimerRef.current) return;
+    frameBufferRef.current.push(incoming);
+    if (!frameBufferRef.current.ready || analysisTimerRef.current) return;
 
     // Run outside the native stream callback and keep only one pending job.
     // If JS is busy, later audio callbacks update the ring and the scheduled
@@ -224,12 +298,13 @@ export function usePitchInput(
   }, [clearInterruptionProblem, clearInterruptionTimer, resumeRecording, setInputProblem, verifyInterruptionRecovery]);
 
   const start = useCallback(async () => {
+    const operation = inputOperationRef.current + 1;
+    inputOperationRef.current = operation;
     desiredListeningRef.current = true;
     clearInterruptionTimer();
     clearAnalysisTimers();
     pitchTrackerRef.current.reset();
-    writeRef.current = 0;
-    filledRef.current = 0;
+    frameBufferRef.current.reset();
     lastAnalysisRef.current = 0;
     setSnapshot(null);
     const recoveringFromProblem = errorSourceRef.current !== null;
@@ -238,6 +313,7 @@ export function usePitchInput(
     let permissionGranted = false;
     try {
       const result = await AudioStudioModule.requestPermissionsAsync() as { granted?: boolean };
+      if (operation !== inputOperationRef.current || !desiredListeningRef.current) return;
       if (!result.granted) {
         desiredListeningRef.current = false;
         setPermission('denied');
@@ -246,8 +322,22 @@ export function usePitchInput(
       permissionGranted = true;
       setPermission('granted');
 
+      if (nativePitchInput.available) {
+        if (nativePitchInput.isRunning() && nativeListening && !recoveringFromProblem) return;
+        await nativePitchInput.start(detectorSettings(profile, sensitivity, noiseGate));
+        if (operation !== inputOperationRef.current || !desiredListeningRef.current) {
+          await nativePitchInput.stop().catch(() => undefined);
+          return;
+        }
+        setNativeListening(true);
+        return;
+      }
+
       if (isPaused) {
         await resumeRecording();
+        if (operation !== inputOperationRef.current || !desiredListeningRef.current) {
+          await stopRecording().catch(() => undefined);
+        }
         return;
       }
       if (isRecording) {
@@ -278,40 +368,63 @@ export function usePitchInput(
         onAudioStream,
       };
       await startRecording(config);
+      if (operation !== inputOperationRef.current || !desiredListeningRef.current) {
+        await stopRecording().catch(() => undefined);
+      }
     } catch (caught) {
+      if (operation !== inputOperationRef.current || !desiredListeningRef.current) return;
+      desiredListeningRef.current = false;
+      setNativeListening(false);
       if (!permissionGranted) setPermission('error');
       setInputProblem(
         caught instanceof Error ? caught.message : 'Microphone input could not be started.',
         'start',
       );
     }
-  }, [clearAnalysisTimers, clearInterruptionTimer, isPaused, isRecording, onAudioStream, onRecordingInterrupted, resumeRecording, setInputProblem, startRecording, stopRecording]);
+  }, [clearAnalysisTimers, clearInterruptionTimer, isPaused, isRecording, nativeListening, noiseGate, onAudioStream, onRecordingInterrupted, profile, resumeRecording, sensitivity, setInputProblem, startRecording, stopRecording]);
 
   const stop = useCallback(async () => {
+    inputOperationRef.current += 1;
     desiredListeningRef.current = false;
     clearInterruptionTimer();
     clearAnalysisTimers();
     pitchTrackerRef.current.reset();
-    writeRef.current = 0;
-    filledRef.current = 0;
+    frameBufferRef.current.reset();
     lastAnalysisRef.current = 0;
     setSnapshot(null);
     errorSourceRef.current = null;
     setError(null);
-    if (!isRecording && !isPaused) return;
+    if (nativePitchInput.available) {
+      setNativeListening(false);
+      try {
+        await nativePitchInput.stop();
+      } catch {
+        // Android may already have stopped capture after an input route failure.
+      }
+      return;
+    }
     try {
       await stopRecording();
     } catch {
       // The native recorder may already be stopped after a route interruption.
     }
-  }, [clearAnalysisTimers, clearInterruptionTimer, isPaused, isRecording, stopRecording]);
+  }, [clearAnalysisTimers, clearInterruptionTimer, stopRecording]);
 
   useEffect(() => () => {
+    inputOperationRef.current += 1;
     desiredListeningRef.current = false;
     clearInterruptionTimer();
     clearAnalysisTimers();
+    if (nativePitchInput.available) void nativePitchInput.stop().catch(() => undefined);
     void stopRecording().catch(() => undefined);
   }, [clearAnalysisTimers, clearInterruptionTimer, stopRecording]);
 
-  return { permission, snapshot, error, isListening: isRecording, start, stop };
+  return {
+    permission,
+    snapshot,
+    error,
+    isListening: nativePitchInput.available ? nativeListening : isRecording,
+    start,
+    stop,
+  };
 }

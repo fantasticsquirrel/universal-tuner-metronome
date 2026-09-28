@@ -15,6 +15,11 @@
     "build:android:apk": "eas build --platform android --profile internal",
     "generate:assets": "node tools/generate-assets.mjs"
   },
+  "expo": {
+    "autolinking": {
+      "nativeModulesDir": "./modules"
+    }
+  },
   "dependencies": {
     "@audio/pitch-yin": "^1.0.5",
     "@expo/vector-icons": "^15.1.1",
