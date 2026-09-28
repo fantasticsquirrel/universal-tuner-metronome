@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="app.tunera.pitch.NativePitchDetectorTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-09-28T00:17:42.186Z" hostname="vmi3070969" time="0.179">
+  <properties/>
+  <testcase name="does not publish silence as pitch" classname="app.tunera.pitch.NativePitchDetectorTest" time="0.07"/>
+  <testcase name="bounds native YIN work on low end devices" classname="app.tunera.pitch.NativePitchDetectorTest" time="0.013"/>
+  <testcase name="preserves pitch accuracy across every detector profile" classname="app.tunera.pitch.NativePitchDetectorTest" time="0.071"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

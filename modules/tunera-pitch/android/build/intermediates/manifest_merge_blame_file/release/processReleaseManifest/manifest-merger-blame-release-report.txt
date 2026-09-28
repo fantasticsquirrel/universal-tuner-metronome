@@ -1,0 +1,11 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="app.tunera.pitch" >
+4
+5    <uses-sdk android:minSdkVersion="29" />
+6
+7    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+7-->/root/.openclaw/workspace/universal-tuner-metronome/modules/tunera-pitch/android/src/main/AndroidManifest.xml:2:3-69
+7-->/root/.openclaw/workspace/universal-tuner-metronome/modules/tunera-pitch/android/src/main/AndroidManifest.xml:2:20-66
+8
+9</manifest>
