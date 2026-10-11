@@ -63,6 +63,11 @@ internal class NativePitchDetector(
   private var decimationCount = 0
   private var lastAnalysisAt = -ANALYSIS_INTERVAL_MS
 
+  // Work in the most recent completed analysis, not a timing estimate.
+  // Counts only the YIN lag search (not RMS or the unchanged refinement).
+  internal var lastYinComparisonCount: Int = 0
+    private set
+
   @Synchronized
   fun configure(profileName: String, threshold: Double, minimumRms: Double) {
     val nextProfile = PitchProfile.from(profileName)
@@ -81,6 +86,7 @@ internal class NativePitchDetector(
     decimationSum = 0.0
     decimationCount = 0
     lastAnalysisAt = -ANALYSIS_INTERVAL_MS
+    lastYinComparisonCount = 0
   }
 
   @Synchronized
@@ -116,6 +122,7 @@ internal class NativePitchDetector(
   }
 
   private fun analyzeFrame(timestamp: Long): NativePitchResult {
+    lastYinComparisonCount = 0
     var squaredSum = 0.0
     var peak = 0.0
     for (sample in frame) {
@@ -134,40 +141,47 @@ internal class NativePitchDetector(
     differences.fill(0f)
     normalizedDifferences.fill(0f)
 
-    for (lag in 1 until limit) {
-      var sum = 0.0
-      for (index in 0 until window) {
-        val difference = frame[index] - frame[index + lag]
-        sum += difference * difference
-      }
-      differences[lag] = sum.toFloat()
-    }
-
     normalizedDifferences[0] = 1f
     var running = 0.0
-    for (lag in 1 until limit) {
-      running += differences[lag]
-      normalizedDifferences[lag] = if (running > 0.0) {
-        (differences[lag] * lag / running).toFloat()
+    var selectedLag = -1
+    for (candidateLag in 1 until limit) {
+      var sum = 0.0
+      for (index in 0 until window) {
+        val difference = frame[index] - frame[index + candidateLag]
+        sum += difference * difference
+      }
+      // Preserve the baseline Float rounding before the Double accumulator,
+      // and Float multiplication before division. Reassociating changes bits.
+      differences[candidateLag] = sum.toFloat()
+      lastYinComparisonCount += window
+      running += differences[candidateLag]
+      normalizedDifferences[candidateLag] = if (running > 0.0) {
+        (differences[candidateLag] * candidateLag / running).toFloat()
       } else {
         1f
       }
-    }
 
-    var lag = 2
-    while (lag < limit - 1) {
-      if (normalizedDifferences[lag] < threshold) {
-        while (
-          lag + 1 < limit - 1 &&
-          normalizedDifferences[lag + 1] < normalizedDifferences[lag]
+      // YIN selects the first below-threshold trough, not a global minimum.
+      // Compute its right neighbor before stopping for identical interpolation.
+      // The last lag may be that neighbor but may never be selected itself.
+      if (selectedLag >= 2) {
+        if (
+          candidateLag < limit - 1 &&
+          normalizedDifferences[candidateLag] < normalizedDifferences[selectedLag]
         ) {
-          lag += 1
+          selectedLag = candidateLag
+        } else {
+          break
         }
-        break
+      } else if (
+        candidateLag >= 2 && candidateLag < limit - 1 &&
+        normalizedDifferences[candidateLag] < threshold
+      ) {
+        selectedLag = candidateLag
       }
-      lag += 1
     }
-    if (lag >= limit - 1) {
+    val lag = selectedLag
+    if (lag < 2 || lag >= limit - 1) {
       return NativePitchResult(null, 0.0, rms, clipping, timestamp)
     }
 

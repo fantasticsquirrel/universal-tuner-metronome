@@ -2,7 +2,18 @@ import React from 'react';
 import type { AudioDataEvent, RecordingConfig } from '@siteed/audio-studio';
 
 import { usePitchInput } from '../usePitchInput';
-import type { PitchSnapshot } from '@/types';
+import type { DetectorProfile, PitchSnapshot } from '@/types';
+
+jest.mock('@/audio/pitchFrameBuffer', () => {
+  const actual = jest.requireActual('@/audio/pitchFrameBuffer');
+  return { PitchFrameBuffer: jest.fn((size: number) => new actual.PitchFrameBuffer(size)) };
+});
+jest.mock('@/lib/pitchTracker', () => {
+  const actual = jest.requireActual('@/lib/pitchTracker');
+  return { ...actual, PitchTracker: jest.fn(() => new actual.PitchTracker()) };
+});
+const mockFrameBuffer = jest.requireMock('@/audio/pitchFrameBuffer').PitchFrameBuffer as jest.Mock;
+const mockPitchTracker = jest.requireMock('@/lib/pitchTracker').PitchTracker as jest.Mock;
 
 const mockStartRecording = jest.fn().mockResolvedValue(undefined);
 const mockStopRecording = jest.fn().mockResolvedValue(undefined);
@@ -47,6 +58,7 @@ jest.mock('@/lib/yin', () => {
 
 interface Renderer {
   unmount: () => void;
+  update: (element: React.ReactElement) => void;
 }
 
 const { act, create } = jest.requireActual('react-test-renderer') as {
@@ -91,8 +103,8 @@ describe('live pitch input scheduling', () => {
   let pitchInput: ReturnType<typeof usePitchInput> | null = null;
   let nativePitchListener: ((snapshot: PitchSnapshot | null) => void) | null = null;
 
-  function Capture() {
-    pitchInput = usePitchInput('general', 65, 0.008);
+  function Capture({ profile = 'general' }: { profile?: DetectorProfile }) {
+    pitchInput = usePitchInput(profile, 65, 0.008);
     return null;
   }
 
@@ -120,6 +132,72 @@ describe('live pitch input scheduling', () => {
     renderer = null;
     pitchInput = null;
     jest.useRealTimers();
+  });
+
+  it('reuses fallback buffers and tracker across pitch-driven and parent renders', async () => {
+    expect(mockFrameBuffer).toHaveBeenCalledTimes(1);
+    expect(mockPitchTracker).toHaveBeenCalledTimes(1);
+    await act(async () => { await pitchInput!.start(); });
+    const config = mockStartRecording.mock.calls[0]![0] as RecordingConfig;
+    for (let index = 0; index < 5; index += 1) {
+      await act(async () => {
+        await config.onAudioStream!(event(new Float32Array(4096).fill(0.2)));
+        jest.advanceTimersByTime(50);
+      });
+    }
+    await act(async () => { renderer!.update(React.createElement(Capture)); });
+    expect(pitchInput!.snapshot?.frequency).toBe(440);
+    expect(mockFrameBuffer).toHaveBeenCalledTimes(1);
+    expect(mockPitchTracker).toHaveBeenCalledTimes(1);
+    await act(async () => { await pitchInput!.stop(); await pitchInput!.start(); });
+    expect(mockFrameBuffer).toHaveBeenCalledTimes(1);
+    expect(mockPitchTracker).toHaveBeenCalledTimes(1);
+  });
+
+  it('allocates a new fallback frame only on profile changes and discards old history', async () => {
+    await act(async () => { await pitchInput!.start(); });
+    const config = mockStartRecording.mock.calls[0]![0] as RecordingConfig;
+    await act(async () => {
+      await config.onAudioStream!(event(new Float32Array(4096).fill(0.2)));
+      jest.advanceTimersByTime(50);
+    });
+    yinMock.detectPitchYin.mockClear();
+    await act(async () => { renderer!.update(React.createElement(Capture, { profile: 'low' })); });
+    await act(async () => { jest.advanceTimersByTime(1); });
+    expect(pitchInput!.snapshot).toBeNull();
+    expect(mockFrameBuffer.mock.calls.map(([size]) => size)).toEqual([4096, 8192]);
+    await act(async () => {
+      await config.onAudioStream!(event(new Float32Array(4096).fill(0.3)));
+      jest.advanceTimersByTime(50);
+    });
+    expect(yinMock.detectPitchYin).not.toHaveBeenCalled();
+    await act(async () => {
+      await config.onAudioStream!(event(new Float32Array(4096).fill(0.4)));
+      jest.advanceTimersByTime(50);
+    });
+    expect(yinMock.detectPitchYin).toHaveBeenCalledTimes(1);
+    expect(yinMock.detectPitchYin.mock.calls[0]![0].length).toBe(8192);
+    expect(mockFrameBuffer).toHaveBeenCalledTimes(2);
+    expect(mockPitchTracker).toHaveBeenCalledTimes(1);
+  });
+
+  it('never allocates fallback PCM buffers on the native backend, including profile changes', async () => {
+    await act(async () => renderer?.unmount());
+    jest.clearAllMocks();
+    mockNativePitchInput.available = true;
+    await act(async () => { renderer = create(React.createElement(Capture)); });
+    await act(async () => { await pitchInput!.start(); });
+    for (let index = 0; index < 5; index += 1) {
+      await act(async () => {
+        nativePitchListener?.({ frequency: 440 + index, confidence: 0.99, rms: 0.01, clipping: false, timestamp: Date.now() });
+      });
+    }
+    await act(async () => { renderer!.update(React.createElement(Capture, { profile: 'low' })); });
+    await act(async () => { await pitchInput!.stop(); await pitchInput!.start(); });
+    expect(mockFrameBuffer).not.toHaveBeenCalled();
+    expect(mockPitchTracker).toHaveBeenCalledTimes(1);
+    expect(mockStartRecording).not.toHaveBeenCalled();
+    expect(mockNativePitchInput.updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({ profile: 'low' }));
   });
 
   it('uses short recorder buffers and coalesces queued input into the newest frame', async () => {
