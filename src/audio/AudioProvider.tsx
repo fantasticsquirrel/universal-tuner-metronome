@@ -19,13 +19,16 @@ import type { MetronomeSettings } from '@/types';
 import { deactivateKeepAwakeIfActive } from './keepAwake';
 import { startLoopingPlayback } from './playerPlayback';
 
-interface AudioContextValue {
-  running: boolean;
+interface AudioPulseValue {
   currentBeat: number;
   currentSubdivision: number;
   countInBarsRemaining: number;
   practiceElapsedSeconds: number;
   practiceSecondsRemaining: number | null;
+}
+
+interface AudioControlsValue {
+  running: boolean;
   toggleMetronome: () => void;
   stopMetronome: () => void;
   tonePlaying: boolean;
@@ -40,7 +43,12 @@ interface PreparedLoopSource {
   release: () => void;
 }
 
-const AudioContext = createContext<AudioContextValue | null>(null);
+type AudioContextValue = AudioControlsValue & AudioPulseValue;
+
+// Beat/subdivision and practice clocks must not invalidate control-only clients
+// such as the tuner. The legacy hook below still subscribes to both channels.
+const AudioControlsContext = createContext<AudioControlsValue | null>(null);
+const AudioPulseContext = createContext<AudioPulseValue | null>(null);
 const KEEP_AWAKE_TAG = 'tunera-metronome';
 const PLAYER_LOAD_TIMEOUT_MS = 10_000;
 
@@ -580,13 +588,8 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
     return () => subscriptions.forEach((subscription) => subscription.remove());
   }, [highTonePlayer, lowTonePlayer]);
 
-  const value = useMemo(() => ({
+  const controls = useMemo<AudioControlsValue>(() => ({
     running,
-    currentBeat,
-    currentSubdivision,
-    countInBarsRemaining,
-    practiceElapsedSeconds,
-    practiceSecondsRemaining,
     toggleMetronome,
     stopMetronome,
     tonePlaying,
@@ -594,27 +597,39 @@ export function AudioProvider({ children }: React.PropsWithChildren) {
     toggleTone,
     retuneTone,
     stopTone,
-  }), [
-    running,
-    currentBeat,
-    currentSubdivision,
-    countInBarsRemaining,
-    practiceElapsedSeconds,
-    practiceSecondsRemaining,
-    toggleMetronome,
-    stopMetronome,
-    tonePlaying,
-    toneError,
-    toggleTone,
-    retuneTone,
-    stopTone,
-  ]);
+  }), [running, toggleMetronome, stopMetronome, tonePlaying, toneError, toggleTone, retuneTone, stopTone]);
 
-  return <AudioContext.Provider value={value}>{children}</AudioContext.Provider>;
+  const pulse = useMemo<AudioPulseValue>(() => ({
+    currentBeat,
+    currentSubdivision,
+    countInBarsRemaining,
+    practiceElapsedSeconds,
+    practiceSecondsRemaining,
+  }), [currentBeat, currentSubdivision, countInBarsRemaining, practiceElapsedSeconds, practiceSecondsRemaining]);
+
+  return (
+    <AudioControlsContext.Provider value={controls}>
+      <AudioPulseContext.Provider value={pulse}>{children}</AudioPulseContext.Provider>
+    </AudioControlsContext.Provider>
+  );
 }
 
-export function useRuntimeAudio(): AudioContextValue {
-  const value = useContext(AudioContext);
-  if (!value) throw new Error('useRuntimeAudio must be used within AudioProvider');
+/** Playback state/actions without beat, subdivision or practice-clock updates. */
+export function useAudioControls(): AudioControlsValue {
+  const value = useContext(AudioControlsContext);
+  if (!value) throw new Error('useAudioControls must be used within AudioProvider');
   return value;
+}
+
+export function useAudioPulse(): AudioPulseValue {
+  const value = useContext(AudioPulseContext);
+  if (!value) throw new Error('useAudioPulse must be used within AudioProvider');
+  return value;
+}
+
+/** Compatibility subscription for metronome and other full-runtime consumers. */
+export function useRuntimeAudio(): AudioContextValue {
+  const controls = useAudioControls();
+  const pulse = useAudioPulse();
+  return useMemo(() => ({ ...controls, ...pulse }), [controls, pulse]);
 }

@@ -16,7 +16,6 @@ import expo.modules.kotlin.modules.ModuleDefinition
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
-import kotlin.math.max
 
 private class PitchPermissionException : CodedException("Microphone permission is required.")
 private class PitchRecorderException(message: String) : CodedException(message)
@@ -92,13 +91,13 @@ class TuneraPitchModule : Module() {
     if (minimumBufferBytes <= 0) {
       throw PitchRecorderException("This device does not support tuner microphone capture.")
     }
-    val bufferBytes = max(minimumBufferBytes, NativePitchDetector.CAPTURE_SAMPLE_RATE / 25 * 2)
+    val capturePlan = NativeCapturePlan(minimumBufferBytes)
     val nextRecorder = AudioRecord(
       MediaRecorder.AudioSource.MIC,
       NativePitchDetector.CAPTURE_SAMPLE_RATE,
       AudioFormat.CHANNEL_IN_MONO,
       AudioFormat.ENCODING_PCM_16BIT,
-      bufferBytes * 2
+      capturePlan.bufferCapacityBytes
     )
     if (nextRecorder.state != AudioRecord.STATE_INITIALIZED) {
       nextRecorder.release()
@@ -120,14 +119,14 @@ class TuneraPitchModule : Module() {
       audioRecord = nextRecorder
       running.set(true)
       recordingThread = thread(name = "TuneraPitchCapture", start = true) {
-        captureLoop(nextRecorder, bufferBytes / 2)
+        captureLoop(nextRecorder, capturePlan.readSamples)
       }
     }
   }
 
-  private fun captureLoop(recorder: AudioRecord, bufferSamples: Int) {
+  private fun captureLoop(recorder: AudioRecord, readSamples: Int) {
     Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
-    val samples = ShortArray(bufferSamples)
+    val samples = ShortArray(readSamples)
     try {
       while (running.get() && !Thread.currentThread().isInterrupted) {
         val read = recorder.read(samples, 0, samples.size, AudioRecord.READ_BLOCKING)

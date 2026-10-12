@@ -1,0 +1,2 @@
+# The root android/ rule is for generated app projects, not this native module.
+!/android/
