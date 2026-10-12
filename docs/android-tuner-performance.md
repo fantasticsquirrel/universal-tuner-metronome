@@ -1,6 +1,6 @@
 # Android tuner performance changes
 
-Baseline: `0a88025be4832fd62b2362fdc56e46247d7189e5` (0.2.2). These changes do not alter version/signing metadata or authorize release.
+Baseline: `0a88025be4832fd62b2362fdc56e46247d7189e5` (0.2.2). The initial optimization preserved version/signing metadata. The subsequently authorized release is 0.2.3 / Android versionCode 6; see [release notes](releases/0.2.3.md).
 
 ## Implemented
 

@@ -113,7 +113,9 @@ describe('live pitch input scheduling', () => {
   });
 
   beforeEach(async () => {
-    jest.useFakeTimers();
+    // React's async act bookkeeping uses microtasks; do not advance it as a
+    // fake timer while an awaited audio callback is still inside act.
+    jest.useFakeTimers({ doNotFake: ['queueMicrotask'] });
     jest.clearAllMocks();
     mockNativePitchInput.available = false;
     nativePitchListener = null;
