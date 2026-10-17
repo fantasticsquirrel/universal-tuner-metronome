@@ -15,7 +15,7 @@ import {
 import { audioStreamSamples } from '@/audio/audioStream';
 import { nativePitchInput, type NativePitchSettings } from '@/audio/nativePitchInput';
 import { PitchFrameBuffer } from '@/audio/pitchFrameBuffer';
-import { detectPitchYin, pitchFrameSize } from '@/lib/yin';
+import { createYinPitchDetector, pitchFrameSize } from '@/lib/yin';
 import { effectiveNoiseGate, minimumConfidence, yinThreshold } from '@/lib/pitch';
 import { PitchTracker } from '@/lib/pitchTracker';
 import type { DetectorProfile, PermissionState, PitchSnapshot } from '@/types';
@@ -56,6 +56,7 @@ export function usePitchInput(
   // Native Android never needs a JavaScript PCM history. Allocate fallback
   // buffers in the profile effect, not in a render-time useRef argument.
   const frameBufferRef = useRef<PitchFrameBuffer | null>(null);
+  const fallbackDetectorRef = useRef<ReturnType<typeof createYinPitchDetector> | null>(null);
   const lastAnalysisRef = useRef(0);
   const analysisTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const snapshotExpiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -118,6 +119,7 @@ export function usePitchInput(
     frameBufferRef.current = nativePitchInput.available
       ? null
       : new PitchFrameBuffer(pitchFrameSize(profile));
+    if (!nativePitchInput.available) fallbackDetectorRef.current ??= createYinPitchDetector();
     lastAnalysisRef.current = 0;
     pitchTracker.reset();
     const clearSnapshotTimer = setTimeout(() => setSnapshot(null), 0);
@@ -241,7 +243,7 @@ export function usePitchInput(
     if (!frame) return;
     lastAnalysisRef.current = Date.now();
     const detectorSettings = detectorSettingsRef.current;
-    const result = detectPitchYin(frame, {
+    const result = fallbackDetectorRef.current!.detect(frame, {
       sampleRate: SAMPLE_RATE,
       profile: detectorSettings.profile,
       threshold: yinThreshold(detectorSettings.sensitivity),
