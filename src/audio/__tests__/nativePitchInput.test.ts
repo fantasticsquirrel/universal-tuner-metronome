@@ -30,4 +30,21 @@ describe('native Android pitch events', () => {
       timestamp: 12_345,
     })).toBeNull();
   });
+
+  it('preserves the age of a latest-value handoff instead of refreshing an old reading', () => {
+    expect(nativePitchSnapshot({
+      detected: true, frequency: 440, confidence: 0.98, rms: 0.01,
+      clipping: false, timestamp: 12_345, ageMs: 75,
+    }, 10_000)?.timestamp).toBe(9_925);
+  });
+
+  it.each([200, 500, Number.NaN, Number.POSITIVE_INFINITY, -1])(
+    'does not publish expired or invalid native age %s',
+    (ageMs) => {
+      expect(nativePitchSnapshot({
+        detected: true, frequency: 440, confidence: 0.98, rms: 0.01,
+        clipping: false, timestamp: 12_345, ageMs,
+      }, 10_000)).toBeNull();
+    },
+  );
 });
