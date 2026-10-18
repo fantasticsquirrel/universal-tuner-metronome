@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Modal,
   Pressable,
@@ -116,6 +116,11 @@ export function NumberField({ label, value, onChange, min, max, suffix, keyboard
   keyboardType?: KeyboardTypeOptions;
 }) {
   const { palette } = useApp();
+  // Keep incomplete text out of tuner state without replacing it under the
+  // keyboard. Valid edits still apply immediately, including when a sheet is
+  // dismissed before the native input can emit a blur event.
+  const [draft, setDraft] = useState<string | null>(null);
+  const finishEditing = () => setDraft(null);
   return (
     <View style={styles.numberField}>
       <Text style={[styles.numberLabel, { color: palette.textMuted }]}>{label}</Text>
@@ -123,12 +128,21 @@ export function NumberField({ label, value, onChange, min, max, suffix, keyboard
         <TextInput
           accessibilityLabel={label}
           keyboardType={keyboardType}
+          returnKeyType="done"
           selectTextOnFocus
-          value={String(value)}
+          value={draft ?? String(value)}
+          onFocus={() => setDraft(String(value))}
           onChangeText={(text) => {
+            setDraft(text);
+            // A trailing separator is a draft too. Reject non-decimal formats
+            // such as exponent/hex notation rather than silently interpreting them.
+            if (!/^[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)$/.test(text)) return;
             const number = Number(text.replace(',', '.'));
-            if (Number.isFinite(number)) onChange(Math.max(min, Math.min(max, number)));
+            if (Number.isFinite(number) && number >= min && number <= max && number !== value) onChange(number);
           }}
+          onBlur={finishEditing}
+          onSubmitEditing={finishEditing}
+          onKeyPress={({ nativeEvent }) => { if (nativeEvent.key === 'Escape') finishEditing(); }}
           style={[styles.numberInput, { color: palette.text }]}
         />
         {suffix ? <Text style={{ color: palette.textMuted }}>{suffix}</Text> : null}

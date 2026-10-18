@@ -184,7 +184,7 @@ export default function LibraryScreen() {
 
             <Text style={[styles.sectionLabel, { color: palette.textMuted }]}>TUNER</Text>
             <Card>
-              <View style={styles.fields}><NumberField label="Concert A" value={state.tuner.a4} min={390} max={490} suffix="Hz" onChange={(a4) => updateTuner({ a4 })} /><NumberField label="Tolerance" value={state.tuner.tolerance} min={1} max={10} suffix="cents" onChange={(tolerance) => updateTuner({ tolerance })} /></View>
+              <View style={styles.fields}><NumberField label="Concert A" value={state.tuner.a4} min={390} max={490} suffix="Hz" keyboardType="decimal-pad" onChange={(a4) => updateTuner({ a4 })} /><NumberField label="Tolerance" value={state.tuner.tolerance} min={1} max={10} suffix="cents" onChange={(tolerance) => updateTuner({ tolerance })} /></View>
               <View style={[styles.volumeRow, { borderTopColor: palette.border }]}><Text style={[styles.settingTitle, { color: palette.text }]}>Reference tone volume</Text><View style={styles.volumeButtons}><PillButton label="−" onPress={() => updateTuner({ referenceToneVolume: Math.max(0.05, state.tuner.referenceToneVolume - 0.1) })} /><Text style={[styles.volume, { color: palette.text }]}>{Math.round(state.tuner.referenceToneVolume * 100)}%</Text><PillButton label="+" onPress={() => updateTuner({ referenceToneVolume: Math.min(1, state.tuner.referenceToneVolume + 0.1) })} /></View></View>
             </Card>
 

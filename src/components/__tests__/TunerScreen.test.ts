@@ -1,5 +1,5 @@
 import React from 'react';
-import { Linking, Text } from 'react-native';
+import { Linking, Text, TextInput } from 'react-native';
 import * as Haptics from 'expo-haptics';
 
 import TunerScreen from '../../../app/(tabs)/index';
@@ -59,6 +59,7 @@ describe('live tuner consumer behavior', () => {
   beforeEach(() => {
     jest.useFakeTimers();
     jest.clearAllMocks();
+    updateTuner.mockReset();
     state = { ...DEFAULT_STATE, tuner: { ...DEFAULT_STATE.tuner } };
     input = { permission: 'granted', snapshot: null, error: null, isListening: true, start: jest.fn().mockResolvedValue(undefined), stop: jest.fn().mockResolvedValue(undefined) };
     audio.running = false;
@@ -240,5 +241,55 @@ describe('live tuner consumer behavior', () => {
     await press(`Use ${instrument.name} ${instrument.variant ?? ''}`);
     expect(updateTuner).toHaveBeenCalledWith(expect.objectContaining({ instrumentId: 'guitar-6', targetIndex: 0 }));
     expect(renderer.root.findAllByType(Sheet)).toHaveLength(0);
+  });
+
+  it('edits Concert A during live pitch delivery and keeps accepted edits across sheet dismissal', async () => {
+    updateTuner.mockImplementation((patch: Partial<TunerSettings>) => {
+      state = { ...state, tuner: { ...state.tuner, ...patch } };
+      renderer.update(React.createElement(TunerScreen));
+    });
+    await mount();
+    const openPitchSetup = async () => {
+      const button = renderer.root.findAllByType(PillButton).find((node: { props: { icon?: string } }) => node.props.icon === 'options-outline');
+      await act(async () => button.props.onPress());
+    };
+    const concertA = () => renderer.root.findAllByType(TextInput).find((node: { props: { accessibilityLabel?: string } }) => node.props.accessibilityLabel === 'Concert A');
+    await openPitchSetup();
+    expect(concertA().props.keyboardType).toBe('decimal-pad');
+    await act(async () => concertA().props.onFocus?.());
+    const screenBefore = (Screen as jest.Mock).mock.calls.length;
+    const miniBefore = (MetronomeMini as jest.Mock).mock.calls.length;
+    const pitchBefore = pitchMock.usePitchInput.mock.calls.length;
+    for (const [index, text] of ['', '4', '44', '442.'].entries()) {
+      await act(async () => concertA().props.onChangeText(text));
+      await pitch(440 + index / 10, 1000 + index * 100);
+      expect(concertA().props.value).toBe(text);
+      expect(state.tuner.a4).toBe(440);
+    }
+    expect(updateTuner).not.toHaveBeenCalled();
+    expect((Screen as jest.Mock).mock.calls.length).toBe(screenBefore);
+    expect((MetronomeMini as jest.Mock).mock.calls.length).toBe(miniBefore);
+    expect(pitchMock.usePitchInput.mock.calls.length - pitchBefore).toBe(4);
+    expect(texts()).toContain('440.3 Hz');
+
+    await act(async () => concertA().props.onChangeText('442.5'));
+    expect(state.tuner.a4).toBe(442.5);
+    expect(updateTuner.mock.calls).toEqual([[{ a4: 442.5 }]]);
+    await pitch(442.5, 2000);
+    expect(renderer.root.findByType(TuningGauge).props.cents).toBeCloseTo(0);
+    expect(input.stop).not.toHaveBeenCalled();
+    expect(input.start).not.toHaveBeenCalled();
+
+    // Closing the modal may unmount its input without delivering a blur event.
+    await press('Close Pitch setup');
+    expect(renderer.root.findAllByType(Sheet)).toHaveLength(0);
+    expect(texts()).toContain('A4 442.5');
+    await openPitchSetup();
+    expect(concertA().props.value).toBe('442.5');
+    await act(async () => concertA().props.onChangeText('4'));
+    await act(async () => renderer.root.findByType(Sheet).props.onClose());
+    await openPitchSetup();
+    expect(concertA().props.value).toBe('442.5');
+    expect(updateTuner).toHaveBeenCalledTimes(1);
   });
 });
