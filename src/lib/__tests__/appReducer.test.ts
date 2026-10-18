@@ -10,6 +10,13 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 }));
 
 describe('app state flows', () => {
+  it('resets Concert A to 440 Hz only when reset is requested', () => {
+    const customized = appReducer(DEFAULT_STATE, { type: 'tuner', patch: { a4: 442.5 } });
+    expect(customized.tuner.a4).toBe(442.5);
+    expect(appReducer(customized, { type: 'hydrate', state: customized }).tuner.a4).toBe(442.5);
+    expect(appReducer(customized, { type: 'reset' }).tuner.a4).toBe(440);
+  });
+
   it('creates, applies, renames, and deletes a practice preset', () => {
     const preset: PracticePreset = {
       id: 'practice-test',

@@ -1,12 +1,36 @@
 import {
   decodePersistedState,
   DEFAULT_STATE,
+  DEFAULT_TUNER,
   migratePersistedState,
   restorePracticePreset,
   STATE_VERSION,
 } from '../persistedState';
 
 describe('persisted state migration', () => {
+  it('defaults fresh and incomplete tuner state to Concert A 440 Hz', () => {
+    expect(DEFAULT_TUNER.a4).toBe(440);
+    expect(DEFAULT_STATE.tuner.a4).toBe(440);
+    for (const input of [undefined, null, {}, { tuner: {} }]) {
+      expect(migratePersistedState(input).tuner.a4).toBe(440);
+    }
+  });
+
+  it('falls back to 440 Hz for malformed or nonfinite stored references', () => {
+    for (const a4 of [undefined, null, '', '442', NaN, Infinity, -Infinity]) {
+      expect(migratePersistedState({ tuner: { a4 } }).tuner.a4).toBe(440);
+    }
+    expect(decodePersistedState('{not-json')).toBeNull();
+    expect(decodePersistedState('{"tuner":{}}')?.tuner.a4).toBe(440);
+  });
+
+  it('preserves explicit saved Concert A values when loading or migrating', () => {
+    for (const a4 of [390, 432, 440, 442.5, 490]) {
+      expect(migratePersistedState({ tuner: { a4 } }).tuner.a4).toBe(a4);
+      expect(decodePersistedState(JSON.stringify({ schemaVersion: STATE_VERSION, tuner: { a4 } }))?.tuner.a4).toBe(a4);
+    }
+  });
+
   it('migrates legacy v1 state and supplies every v2 field', () => {
     const migrated = migratePersistedState({
       tuner: { instrumentId: 'guitar-6', tuningId: 'guitar-drop-d', a4: 442 },
