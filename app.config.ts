@@ -7,7 +7,7 @@ const config: ExpoConfig = {
   extra: {
     eas: { projectId: 'bdc76f5c-c510-4dba-86eb-b27d7795fa5d' },
   },
-  version: '0.2.4',
+  version: '0.2.5',
   orientation: 'default',
   icon: './assets/icon.png',
   scheme: 'tunera',
@@ -22,7 +22,7 @@ const config: ExpoConfig = {
   },
   android: {
     package: 'app.tunera.mobile',
-    versionCode: 7,
+    versionCode: 8,
     adaptiveIcon: {
       foregroundImage: './assets/adaptive-icon.png',
       backgroundColor: '#071512',
