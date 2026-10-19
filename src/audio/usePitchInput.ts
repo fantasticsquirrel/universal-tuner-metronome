@@ -62,6 +62,8 @@ export function usePitchInput(
   const snapshotExpiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [pitchTracker] = useState(() => new PitchTracker());
   const inputOperationRef = useRef(0);
+  const permissionOperationRef = useRef(0);
+  const mountedRef = useRef(false);
   const desiredListeningRef = useRef(false);
   const appPlaybackActiveRef = useRef(appPlaybackActive);
   const lastAudioAtRef = useRef(0);
@@ -126,61 +128,26 @@ export function usePitchInput(
     return () => clearTimeout(clearSnapshotTimer);
   }, [clearAnalysisTimers, pitchTracker, profile]);
 
-  const refreshPermission = useCallback(() => {
-    void AudioStudioModule.getPermissionsAsync()
-      .then((result: { granted?: boolean; status?: string }) => {
-        setPermission(result.granted ? 'granted' : result.status === 'denied' ? 'denied' : 'undetermined');
-      })
-      .catch(() => setPermission('undetermined'));
+  const refreshPermission = useCallback(async (): Promise<PermissionState | null> => {
+    const operation = ++permissionOperationRef.current;
+    let nextPermission: PermissionState;
+    try {
+      const result = await AudioStudioModule.getPermissionsAsync() as {
+        granted?: boolean;
+        status?: string;
+      };
+      nextPermission = result.granted
+        ? 'granted'
+        : result.status === 'denied' ? 'denied' : 'undetermined';
+    } catch {
+      nextPermission = 'error';
+    }
+    // A newer read, explicit Start/Stop, backgrounding or unmount wins. In
+    // particular, a stale launch read must not overwrite a user's denial.
+    if (!mountedRef.current || operation !== permissionOperationRef.current) return null;
+    setPermission(nextPermission);
+    return nextPermission;
   }, []);
-
-  useEffect(() => {
-    refreshPermission();
-    const subscription = AppState.addEventListener('change', (nextState) => {
-      if (nextState !== 'active') {
-        if (nativePitchInput.available && desiredListeningRef.current) {
-          inputOperationRef.current += 1;
-          setNativeListening(false);
-          clearAnalysisTimers();
-          pitchTracker.reset();
-          setSnapshot(null);
-          void nativePitchInput.stop().catch(() => undefined);
-        }
-        return;
-      }
-
-      refreshPermission();
-      if (
-        !nativePitchInput.available
-        || !desiredListeningRef.current
-        || nativePitchInput.isRunning()
-      ) return;
-
-      const operation = inputOperationRef.current + 1;
-      inputOperationRef.current = operation;
-      const settings = detectorSettingsRef.current;
-      void nativePitchInput
-        .start(detectorSettings(settings.profile, settings.sensitivity, settings.noiseGate))
-        .then(() => {
-          if (operation !== inputOperationRef.current || !desiredListeningRef.current) {
-            return nativePitchInput.stop();
-          }
-          setNativeListening(true);
-          clearInterruptionProblem();
-          return undefined;
-        })
-        .catch((caught) => {
-          if (operation !== inputOperationRef.current || !desiredListeningRef.current) return;
-          desiredListeningRef.current = false;
-          setNativeListening(false);
-          setInputProblem(
-            caught instanceof Error ? caught.message : 'Microphone input could not be resumed.',
-            'interruption',
-          );
-        });
-    });
-    return () => subscription.remove();
-  }, [clearAnalysisTimers, clearInterruptionProblem, pitchTracker, refreshPermission, setInputProblem]);
 
   const publishTrackedSnapshot = useCallback((result: PitchSnapshot | null) => {
     if (snapshotExpiryTimerRef.current) clearTimeout(snapshotExpiryTimerRef.current);
@@ -306,6 +273,7 @@ export function usePitchInput(
   }, [clearInterruptionProblem, clearInterruptionTimer, resumeRecording, setInputProblem, verifyInterruptionRecovery]);
 
   const start = useCallback(async () => {
+    permissionOperationRef.current += 1;
     const operation = inputOperationRef.current + 1;
     inputOperationRef.current = operation;
     desiredListeningRef.current = true;
@@ -322,6 +290,7 @@ export function usePitchInput(
     try {
       const result = await AudioStudioModule.requestPermissionsAsync() as { granted?: boolean };
       if (operation !== inputOperationRef.current || !desiredListeningRef.current) return;
+      permissionOperationRef.current += 1;
       if (!result.granted) {
         desiredListeningRef.current = false;
         setPermission('denied');
@@ -383,7 +352,10 @@ export function usePitchInput(
       if (operation !== inputOperationRef.current || !desiredListeningRef.current) return;
       desiredListeningRef.current = false;
       setNativeListening(false);
-      if (!permissionGranted) setPermission('error');
+      if (!permissionGranted) {
+        permissionOperationRef.current += 1;
+        setPermission('error');
+      }
       setInputProblem(
         caught instanceof Error ? caught.message : 'Microphone input could not be started.',
         'start',
@@ -392,6 +364,7 @@ export function usePitchInput(
   }, [clearAnalysisTimers, clearInterruptionTimer, isPaused, isRecording, nativeListening, noiseGate, onAudioStream, onRecordingInterrupted, pitchTracker, profile, resumeRecording, sensitivity, setInputProblem, startRecording, stopRecording]);
 
   const stop = useCallback(async () => {
+    permissionOperationRef.current += 1;
     inputOperationRef.current += 1;
     desiredListeningRef.current = false;
     clearInterruptionTimer();
@@ -417,6 +390,75 @@ export function usePitchInput(
       // The native recorder may already be stopped after a route interruption.
     }
   }, [clearAnalysisTimers, clearInterruptionTimer, pitchTracker, stopRecording]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    void refreshPermission();
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState !== 'active') {
+        permissionOperationRef.current += 1;
+        if (nativePitchInput.available && desiredListeningRef.current) {
+          inputOperationRef.current += 1;
+          setNativeListening(false);
+          clearInterruptionTimer();
+          clearAnalysisTimers();
+          pitchTracker.reset();
+          setSnapshot(null);
+          void nativePitchInput.stop().catch(() => undefined);
+        }
+        return;
+      }
+
+      const operation = inputOperationRef.current;
+      const permissionOperation = permissionOperationRef.current + 1;
+      void refreshPermission().then(async (nextPermission) => {
+        if (
+          nextPermission === null
+          || !mountedRef.current
+          || permissionOperation !== permissionOperationRef.current
+          || operation !== inputOperationRef.current
+        ) return;
+        if (nextPermission !== 'granted') {
+          // Never request permission automatically after it has been revoked.
+          // Stop either backend, including a recorder that still reports active.
+          await stop();
+          return;
+        }
+        if (
+          !nativePitchInput.available
+          || !desiredListeningRef.current
+          || nativePitchInput.isRunning()
+        ) return;
+
+        const resumeOperation = ++inputOperationRef.current;
+        const settings = detectorSettingsRef.current;
+        try {
+          await nativePitchInput.start(
+            detectorSettings(settings.profile, settings.sensitivity, settings.noiseGate),
+          );
+          if (resumeOperation !== inputOperationRef.current || !desiredListeningRef.current) {
+            await nativePitchInput.stop().catch(() => undefined);
+            return;
+          }
+          setNativeListening(true);
+          clearInterruptionProblem();
+        } catch (caught) {
+          if (resumeOperation !== inputOperationRef.current || !desiredListeningRef.current) return;
+          desiredListeningRef.current = false;
+          setNativeListening(false);
+          setInputProblem(
+            caught instanceof Error ? caught.message : 'Microphone input could not be resumed.',
+            'interruption',
+          );
+        }
+      });
+    });
+    return () => {
+      mountedRef.current = false;
+      permissionOperationRef.current += 1;
+      subscription.remove();
+    };
+  }, [clearAnalysisTimers, clearInterruptionProblem, clearInterruptionTimer, pitchTracker, refreshPermission, setInputProblem, stop]);
 
   useEffect(() => () => {
     inputOperationRef.current += 1;

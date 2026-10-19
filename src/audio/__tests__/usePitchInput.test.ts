@@ -1,4 +1,5 @@
 import React from 'react';
+import { AppState, type AppStateStatus } from 'react-native';
 import type { AudioDataEvent, RecordingConfig } from '@siteed/audio-studio';
 
 import { usePitchInput } from '../usePitchInput';
@@ -73,9 +74,11 @@ const yinMock = jest.requireMock('@/lib/yin') as {
 };
 const audioStudioMock = jest.requireMock('@siteed/audio-studio') as {
   AudioStudioModule: {
+    getPermissionsAsync: jest.Mock<Promise<{ granted: boolean; status?: string }>, []>;
     requestPermissionsAsync: jest.Mock<Promise<{ granted: boolean }>, []>;
   };
 };
+const mockGetPermissions = audioStudioMock.AudioStudioModule.getPermissionsAsync;
 const mockRequestPermissions = audioStudioMock.AudioStudioModule.requestPermissionsAsync;
 const nativePitchModuleMock = jest.requireMock('@/audio/nativePitchInput') as {
   nativePitchInput: {
@@ -101,14 +104,36 @@ function event(samples: Float32Array): AudioDataEvent {
   };
 }
 
-describe('live pitch input scheduling', () => {
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+describe('live pitch input scheduling and permissions', () => {
   let renderer: Renderer | null = null;
   let pitchInput: ReturnType<typeof usePitchInput> | null = null;
+  let appStateListener: ((state: AppStateStatus) => void) | null = null;
   let nativePitchListener: ((snapshot: PitchSnapshot | null) => void) | null = null;
 
   function Capture({ profile = 'general' }: { profile?: DetectorProfile }) {
     pitchInput = usePitchInput(profile, 65, 0.008);
     return null;
+  }
+
+  async function remount(native = false) {
+    await act(async () => renderer?.unmount());
+    jest.clearAllMocks();
+    mockNativePitchInput.available = native;
+    await act(async () => { renderer = create(React.createElement(Capture)); });
+  }
+
+  async function changeAppState(state: AppStateStatus) {
+    await act(async () => { appStateListener!(state); });
   }
 
   beforeAll(() => {
@@ -120,6 +145,15 @@ describe('live pitch input scheduling', () => {
     // fake timer while an awaited audio callback is still inside act.
     jest.useFakeTimers({ doNotFake: ['queueMicrotask'] });
     jest.clearAllMocks();
+    mockGetPermissions.mockReset().mockResolvedValue({ granted: true });
+    mockRequestPermissions.mockReset().mockResolvedValue({ granted: true });
+    mockNativePitchInput.start.mockReset().mockResolvedValue(undefined);
+    mockNativePitchInput.stop.mockReset().mockResolvedValue(undefined);
+    mockNativePitchInput.isRunning.mockReset().mockReturnValue(false);
+    jest.spyOn(AppState, 'addEventListener').mockImplementation((_type, listener) => {
+      appStateListener = listener;
+      return { remove: jest.fn() };
+    });
     mockNativePitchInput.available = false;
     nativePitchListener = null;
     mockNativePitchInput.addPitchListener.mockImplementation((listener) => {
@@ -136,7 +170,257 @@ describe('live pitch input scheduling', () => {
     await act(async () => renderer?.unmount());
     renderer = null;
     pitchInput = null;
+    jest.restoreAllMocks();
     jest.useRealTimers();
+  });
+
+  it.each([
+    [false, { granted: false, status: 'undetermined' }, 'undetermined'],
+    [false, { granted: false, status: 'denied' }, 'denied'],
+    [false, { granted: true }, 'granted'],
+    [true, { granted: false, status: 'undetermined' }, 'undetermined'],
+    [true, { granted: false, status: 'denied' }, 'denied'],
+    [true, { granted: true }, 'granted'],
+  ] as const)('only reads launch permission (native=%s, result=%j)', async (native, result, expected) => {
+    mockGetPermissions.mockResolvedValueOnce(result);
+    await remount(native);
+
+    expect(pitchInput!.permission).toBe(expected);
+    expect(mockGetPermissions).toHaveBeenCalledTimes(1);
+    expect(mockRequestPermissions).not.toHaveBeenCalled();
+    expect(mockNativePitchInput.start).not.toHaveBeenCalled();
+    expect(mockStartRecording).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the launch permission read fails', async () => {
+    mockGetPermissions.mockRejectedValueOnce(new Error('Permission check unavailable'));
+    await remount();
+
+    expect(pitchInput!.permission).toBe('error');
+    expect(mockRequestPermissions).not.toHaveBeenCalled();
+    expect(mockStartRecording).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('does not capture after an explicit denial (native=%s)', async (native) => {
+    await remount(native);
+    mockRequestPermissions.mockResolvedValueOnce({ granted: false });
+    await act(async () => { await pitchInput!.start(); });
+
+    expect(pitchInput!.permission).toBe('denied');
+    expect(pitchInput!.isListening).toBe(false);
+    expect(mockRequestPermissions).toHaveBeenCalledTimes(1);
+    expect(mockNativePitchInput.start).not.toHaveBeenCalled();
+    expect(mockStartRecording).not.toHaveBeenCalled();
+    await changeAppState('background');
+    await changeAppState('active');
+    expect(mockRequestPermissions).toHaveBeenCalledTimes(1);
+    expect(mockNativePitchInput.start).not.toHaveBeenCalled();
+    expect(mockStartRecording).not.toHaveBeenCalled();
+  });
+
+  it('waits for a fresh grant before resuming native capture', async () => {
+    await remount(true);
+    await act(async () => { await pitchInput!.start(); });
+    await changeAppState('background');
+    const check = deferred<{ granted: boolean }>();
+    mockGetPermissions.mockReturnValueOnce(check.promise);
+    await changeAppState('active');
+
+    expect(mockNativePitchInput.start).toHaveBeenCalledTimes(1);
+    expect(pitchInput!.isListening).toBe(false);
+    await act(async () => { check.resolve({ granted: true }); });
+    expect(mockNativePitchInput.start).toHaveBeenCalledTimes(2);
+    expect(pitchInput!.isListening).toBe(true);
+    expect(mockRequestPermissions).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['denied', 'undetermined', 'error'] as const)(
+    'stops and clears resume intent after a %s foreground check without prompting',
+    async (result) => {
+      await remount(true);
+      await act(async () => { await pitchInput!.start(); });
+      await changeAppState('background');
+      if (result === 'error') mockGetPermissions.mockRejectedValueOnce(new Error('Permission check failed'));
+      else mockGetPermissions.mockResolvedValueOnce({ granted: false, status: result });
+      await changeAppState('active');
+
+      expect(pitchInput!.permission).toBe(result);
+      expect(pitchInput!.isListening).toBe(false);
+      expect(pitchInput!.snapshot).toBeNull();
+      expect(mockNativePitchInput.stop).toHaveBeenCalledTimes(2);
+      expect(mockNativePitchInput.start).toHaveBeenCalledTimes(1);
+      await changeAppState('background');
+      await changeAppState('active');
+      expect(mockNativePitchInput.start).toHaveBeenCalledTimes(1);
+      expect(mockRequestPermissions).toHaveBeenCalledTimes(1);
+
+      // A later explicit user action can recover after permission is restored.
+      await act(async () => { await pitchInput!.start(); });
+      expect(mockNativePitchInput.start).toHaveBeenCalledTimes(2);
+      expect(pitchInput!.isListening).toBe(true);
+    },
+  );
+
+  it('stops native capture on revocation even if the backend still reports running', async () => {
+    await remount(true);
+    await act(async () => { await pitchInput!.start(); });
+    mockNativePitchInput.isRunning.mockReturnValue(true);
+    mockGetPermissions.mockResolvedValueOnce({ granted: false, status: 'denied' });
+    await changeAppState('active');
+
+    expect(pitchInput!.permission).toBe('denied');
+    expect(pitchInput!.isListening).toBe(false);
+    expect(mockNativePitchInput.stop).toHaveBeenCalledTimes(1);
+    expect(mockNativePitchInput.start).toHaveBeenCalledTimes(1);
+    expect(mockRequestPermissions).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops the in-memory fallback and ignores late audio after permission revocation', async () => {
+    await act(async () => { await pitchInput!.start(); });
+    const config = mockStartRecording.mock.calls[0]![0] as RecordingConfig;
+    await act(async () => {
+      await config.onAudioStream!(event(new Float32Array(4096).fill(0.2)));
+      jest.advanceTimersByTime(50);
+    });
+    expect(pitchInput!.snapshot).not.toBeNull();
+    mockGetPermissions.mockResolvedValueOnce({ granted: false, status: 'denied' });
+    await changeAppState('active');
+    yinMock.detectPitchYin.mockClear();
+    await act(async () => {
+      await config.onAudioStream!(event(new Float32Array(4096).fill(0.3)));
+      jest.runOnlyPendingTimers();
+    });
+
+    expect(pitchInput!.permission).toBe('denied');
+    expect(pitchInput!.snapshot).toBeNull();
+    expect(mockStopRecording).toHaveBeenCalledTimes(1);
+    expect(yinMock.detectPitchYin).not.toHaveBeenCalled();
+    expect(config.output).toEqual({ primary: { enabled: false } });
+    expect(mockRequestPermissions).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['stop', 'background', 'unmount'] as const)(
+    'does not resume when %s wins a pending foreground check',
+    async (action) => {
+      await remount(true);
+      await act(async () => { await pitchInput!.start(); });
+      await changeAppState('background');
+      const check = deferred<{ granted: boolean }>();
+      mockGetPermissions.mockReturnValueOnce(check.promise);
+      await changeAppState('active');
+      if (action === 'stop') await act(async () => { await pitchInput!.stop(); });
+      else if (action === 'background') await changeAppState('background');
+      else await act(async () => { renderer!.unmount(); renderer = null; });
+      await act(async () => { check.resolve({ granted: true }); });
+
+      expect(mockNativePitchInput.start).toHaveBeenCalledTimes(1);
+      expect(mockRequestPermissions).toHaveBeenCalledTimes(1);
+      if (action !== 'unmount') expect(pitchInput!.isListening).toBe(false);
+    },
+  );
+
+  it('uses only the newest foreground permission check across repeated transitions', async () => {
+    await remount(true);
+    await act(async () => { await pitchInput!.start(); });
+    await changeAppState('background');
+    const oldCheck = deferred<{ granted: boolean; status?: string }>();
+    const newCheck = deferred<{ granted: boolean }>();
+    mockGetPermissions.mockReturnValueOnce(oldCheck.promise).mockReturnValueOnce(newCheck.promise);
+    await changeAppState('active');
+    await changeAppState('inactive');
+    await changeAppState('background');
+    await changeAppState('active');
+    await act(async () => { newCheck.resolve({ granted: true }); });
+    await act(async () => { oldCheck.resolve({ granted: false, status: 'denied' }); });
+
+    expect(pitchInput!.permission).toBe('granted');
+    expect(pitchInput!.isListening).toBe(true);
+    expect(mockNativePitchInput.start).toHaveBeenCalledTimes(2);
+    expect(mockRequestPermissions).toHaveBeenCalledTimes(1);
+    await changeAppState('background');
+    await changeAppState('active');
+    expect(mockNativePitchInput.start).toHaveBeenCalledTimes(3);
+    expect(pitchInput!.isListening).toBe(true);
+  });
+
+  it.each(['denied', 'error'] as const)(
+    'does not overwrite an explicit %s with a read started while the prompt was pending',
+    async (result) => {
+      await remount(true);
+      const request = deferred<{ granted: boolean }>();
+      const check = deferred<{ granted: boolean }>();
+      mockRequestPermissions.mockReturnValueOnce(request.promise);
+      let startPromise!: Promise<void>;
+      await act(async () => { startPromise = pitchInput!.start(); });
+      mockGetPermissions.mockReturnValueOnce(check.promise);
+      await changeAppState('active');
+      await act(async () => {
+        if (result === 'denied') request.resolve({ granted: false });
+        else request.reject(new Error('Permission request failed'));
+        await startPromise;
+      });
+      await act(async () => { check.resolve({ granted: true }); });
+
+      expect(pitchInput!.permission).toBe(result);
+      expect(mockNativePitchInput.start).not.toHaveBeenCalled();
+      expect(mockRequestPermissions).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('ignores a stale foreground grant after a newer denial', async () => {
+    await remount(true);
+    await act(async () => { await pitchInput!.start(); });
+    await changeAppState('background');
+    const oldCheck = deferred<{ granted: boolean }>();
+    mockGetPermissions.mockReturnValueOnce(oldCheck.promise);
+    await changeAppState('active');
+    await changeAppState('background');
+    mockGetPermissions.mockResolvedValueOnce({ granted: false, status: 'denied' });
+    await changeAppState('active');
+    await act(async () => { oldCheck.resolve({ granted: true }); });
+
+    expect(pitchInput!.permission).toBe('denied');
+    expect(pitchInput!.isListening).toBe(false);
+    expect(mockNativePitchInput.start).toHaveBeenCalledTimes(1);
+    expect(mockRequestPermissions).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores an old launch grant after an explicit permission denial', async () => {
+    const launchCheck = deferred<{ granted: boolean }>();
+    mockGetPermissions.mockReturnValueOnce(launchCheck.promise);
+    await remount(true);
+    mockRequestPermissions.mockResolvedValueOnce({ granted: false });
+    await act(async () => { await pitchInput!.start(); });
+    await act(async () => { launchCheck.resolve({ granted: true }); });
+
+    expect(pitchInput!.permission).toBe('denied');
+    expect(mockNativePitchInput.start).not.toHaveBeenCalled();
+  });
+
+  it('ignores an old launch denial after an explicit grant', async () => {
+    const launchCheck = deferred<{ granted: boolean; status: string }>();
+    mockGetPermissions.mockReturnValueOnce(launchCheck.promise);
+    await remount(true);
+    await act(async () => { await pitchInput!.start(); });
+    await act(async () => { launchCheck.resolve({ granted: false, status: 'denied' }); });
+
+    expect(pitchInput!.permission).toBe('granted');
+    expect(pitchInput!.isListening).toBe(true);
+    expect(mockNativePitchInput.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a launch check that resolves after unmount', async () => {
+    const launchCheck = deferred<{ granted: boolean }>();
+    mockGetPermissions.mockReturnValueOnce(launchCheck.promise);
+    await remount(true);
+    const lastPermission = pitchInput!.permission;
+    await act(async () => { renderer!.unmount(); renderer = null; });
+    await act(async () => { launchCheck.resolve({ granted: true }); });
+
+    expect(lastPermission).toBe('checking');
+    expect(pitchInput!.permission).toBe('checking');
+    expect(mockNativePitchInput.start).not.toHaveBeenCalled();
+    expect(mockRequestPermissions).not.toHaveBeenCalled();
   });
 
   it('reuses fallback buffers and tracker across pitch-driven and parent renders', async () => {
@@ -217,6 +501,8 @@ describe('live pitch input scheduling', () => {
     const config = mockStartRecording.mock.calls[0]![0] as RecordingConfig;
     expect(config.interval).toBe(50);
     expect(config.bufferDurationSeconds).toBe(0.02);
+    expect(config.output).toEqual({ primary: { enabled: false } });
+    expect(config.keepFullAnalysis).toBe(false);
 
     const first = new Float32Array(4096).fill(0.1);
     const newest = new Float32Array(4096).fill(0.2);

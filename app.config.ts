@@ -7,11 +7,13 @@ const config: ExpoConfig = {
   extra: {
     eas: { projectId: 'bdc76f5c-c510-4dba-86eb-b27d7795fa5d' },
   },
-  version: '0.2.5',
+  version: '0.2.6',
   orientation: 'default',
   icon: './assets/icon.png',
   scheme: 'tunera',
   userInterfaceStyle: 'automatic',
+  // Public builds are self-contained; updates require installing a new APK.
+  updates: { enabled: false },
   ios: {
     supportsTablet: true,
     bundleIdentifier: 'app.tunera.mobile',
@@ -22,7 +24,7 @@ const config: ExpoConfig = {
   },
   android: {
     package: 'app.tunera.mobile',
-    versionCode: 8,
+    versionCode: 9,
     adaptiveIcon: {
       foregroundImage: './assets/adaptive-icon.png',
       backgroundColor: '#071512',
@@ -34,6 +36,7 @@ const config: ExpoConfig = {
     favicon: './assets/favicon.png',
   },
   plugins: [
+    './plugins/withMinimalAndroidPermissions',
     'expo-router',
     [
       'expo-splash-screen',
