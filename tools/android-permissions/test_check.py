@@ -50,6 +50,17 @@ class ManifestPolicyTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'signature protection'):
             check_manifest(manifest().replace('android:protectionLevel="signature"', 'android:protectionLevel="normal"'))
 
+    def test_accepts_compiled_signature_protection(self):
+        for level in ('0x2', '2'):
+            with self.subTest(level=level):
+                xml = manifest().replace('android:protectionLevel="signature"', f'android:protectionLevel="{level}"')
+                self.assertEqual(check_manifest(xml), sorted(EXPECTED_PERMISSIONS))
+
+    def test_rejects_other_compiled_protection_levels(self):
+        for level in ('0', '0x0', '1', '0x1', '3', '0x3', '0x12', 'signature|privileged', ''):
+            with self.subTest(level=level), self.assertRaisesRegex(ValueError, 'signature protection'):
+                check_manifest(manifest().replace('android:protectionLevel="signature"', f'android:protectionLevel="{level}"'))
+
 
 if __name__ == '__main__':
     unittest.main()

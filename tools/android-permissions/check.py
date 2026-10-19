@@ -54,7 +54,8 @@ def check_manifest(xml):
     internal = root.find('permission')
     if (internal is None
             or internal.get(ANDROID + 'name') != 'app.tunera.mobile.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION'
-            or internal.get(ANDROID + 'protectionLevel') != 'signature'):
+            # apkanalyzer prints the compiled enum as 0x2; merged XML uses its name.
+            or internal.get(ANDROID + 'protectionLevel') not in {'signature', '0x2', '2'}):
         raise ValueError('The AndroidX receiver permission must retain signature protection.')
     return sorted(permissions)
 
